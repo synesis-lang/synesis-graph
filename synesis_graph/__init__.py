@@ -1,7 +1,8 @@
 """synesis-graph — Universal pipeline Synesis → Graph Databases."""
 
-from importlib.metadata import version as _pkg_version, PackageNotFoundError
 import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 try:
@@ -14,14 +15,14 @@ _repo_root = Path(__file__).parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from synesis2graph import (  # noqa: F401  (public API re-export)
-    run_pipeline,
-    compile_project,
-    load_json_project,
-    GraphPayload,
-    PipelineResult,
-    BACKEND_NEO4J,
+from synesis2graph import (  # noqa: E402, F401  (public API re-export; sys.path set above)
     BACKEND_GRAPHQLITE,
     BACKEND_HTML,
+    BACKEND_NEO4J,
     SUPPORTED_BACKENDS,
+    GraphPayload,
+    PipelineResult,
+    compile_project,
+    load_json_project,
+    run_pipeline,
 )

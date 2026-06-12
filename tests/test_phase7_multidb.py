@@ -1,0 +1,302 @@
+from pathlib import Path
+from typing import Any, Optional
+
+
+class _DummyStep:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class DummyReporter:
+    def info(self, msg: str) -> None:
+        return None
+
+    def success(self, msg: str) -> None:
+        return None
+
+    def warning(self, msg: str) -> None:
+        return None
+
+    def error(self, msg: str) -> None:
+        return None
+
+    def step(self, desc: str) -> _DummyStep:
+        return _DummyStep()
+
+    def print_diagnostics(self, diagnostics) -> None:
+        return None
+
+
+def _write_full_config(path: Path) -> None:
+    path.write_text(
+        """
+[neo4j]
+uri = "bolt://127.0.0.1:7687"
+user = "neo4j"
+password = "secret"
+
+[graphqlite]
+db_path = "./graphs/{project}.db"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _make_payload(s2g: Any):
+    return s2g.GraphPayload(
+        project_name="demo_project",
+        concept_label="Concept",
+        scalar_fields=[],
+        graph_fields=[],
+        chain_fields=[],
+        code_fields=[],
+        source_fields=[],
+        value_maps={},
+        concepts=[{"props": {"name": "c1", "description": "d", "created": 1}, "relations": {}}],
+        sources=[{"bibtex": "s1", "title": "Title"}],
+        items=[{"item_id": "i1", "content": "text"}],
+        chains=[],
+        mentions=[{"item_id": "i1", "concept": "c1", "mention_order": 0}],
+        from_source=[{"item_id": "i1", "ref": "s1"}],
+    )
+
+
+def test_load_config_missing_graphqlite_section_returns_error(s2g, tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        """
+[neo4j]
+uri = "bolt://127.0.0.1:7687"
+user = "neo4j"
+password = "secret"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = s2g.load_config(cfg, s2g.BACKEND_GRAPHQLITE)
+    assert isinstance(result, s2g.ConnectionError)
+    assert result.stage == "config"
+    assert "[graphqlite]" in (result.details or "")
+
+
+def test_load_config_missing_neo4j_section_returns_error(s2g, tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        """
+[graphqlite]
+db_path = "./graphs/{project}.db"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = s2g.load_config(cfg, s2g.BACKEND_NEO4J)
+    assert isinstance(result, s2g.ConnectionError)
+    assert result.stage == "config"
+    assert "[neo4j]" in (result.details or "")
+
+
+def test_run_pipeline_rejects_invalid_backend(s2g, tmp_path):
+    project = tmp_path / "proj.synp"
+    project.write_text("x", encoding="utf-8")
+    cfg = tmp_path / "config.toml"
+    _write_full_config(cfg)
+
+    result = s2g.run_pipeline(project, cfg, DummyReporter(), backend="invalid")
+    assert not result.success
+    assert isinstance(result.error, s2g.ConnectionError)
+    assert result.error.stage == "backend"
+
+
+def test_neo4j_adapter_connect_failure_returns_connection_error(s2g, monkeypatch):
+    class FakeGraphDatabase:
+        @staticmethod
+        def driver(uri: str, auth: Any):
+            raise RuntimeError("auth failed")
+
+    monkeypatch.setattr(s2g, "get_neo4j_driver_factory", lambda: FakeGraphDatabase)
+    adapter = s2g.Neo4jBackendAdapter(
+        s2g.Neo4jConfig(uri="bolt://127.0.0.1:7687", user="neo4j", password="wrong")
+    )
+
+    err = adapter.connect(DummyReporter())
+    assert isinstance(err, s2g.ConnectionError)
+    assert err.stage == "connection"
+    assert "auth failed" in (err.details or "")
+
+
+def test_graphqlite_adapter_invalid_directory_path_returns_config_error(s2g, tmp_path, monkeypatch):
+    project = tmp_path / "proj.synp"
+    project.write_text("x", encoding="utf-8")
+    cfg = tmp_path / "config.toml"
+    _write_full_config(cfg)
+
+    db_dir = tmp_path / "graph.db"
+    db_dir.mkdir()
+
+    adapter = s2g.GraphQLiteBackendAdapter(
+        s2g.GraphQLiteConfig(db_path=str(db_dir)),
+        config_path=cfg,
+        project_path=project,
+    )
+    assert adapter.preflight(DummyReporter()) is None
+    monkeypatch.setattr(s2g, "get_graphqlite_connect_factory", lambda: (lambda *args, **kwargs: None))
+
+    err = adapter.connect(DummyReporter())
+    assert isinstance(err, s2g.ConnectionError)
+    assert err.stage == "config"
+    assert "directory" in (err.details or "").lower()
+
+
+def test_graphqlite_adapter_smoke_recreates_db_and_syncs(s2g, tmp_path, monkeypatch):
+    class FakeGraphQLiteConn:
+        def __init__(self):
+            self.cypher_calls = []
+            self.execute_calls = []
+            self.closed = False
+
+        def cypher(self, query: str, params: Optional[dict] = None):
+            self.cypher_calls.append((query, params))
+            return []
+
+        def execute(self, sql: str):
+            self.execute_calls.append(sql)
+            return None
+
+        def close(self):
+            self.closed = True
+
+    project = tmp_path / "proj.synp"
+    project.write_text("x", encoding="utf-8")
+    cfg = tmp_path / "config.toml"
+    _write_full_config(cfg)
+
+    db_path = tmp_path / "graphs" / "proj.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.write_text("old-db", encoding="utf-8")
+
+    conn = FakeGraphQLiteConn()
+
+    def fake_connect(path: str, extension_path: Optional[str] = None):
+        Path(path).write_text("new-db", encoding="utf-8")
+        return conn
+
+    monkeypatch.setattr(s2g, "get_graphqlite_connect_factory", lambda: fake_connect)
+
+    adapter = s2g.GraphQLiteBackendAdapter(
+        s2g.GraphQLiteConfig(db_path=str(db_path)),
+        config_path=cfg,
+        project_path=project,
+    )
+    assert adapter.preflight(DummyReporter()) is None
+
+    err = s2g.execute_backend_pipeline(adapter, _make_payload(s2g), DummyReporter())
+    assert err is None
+    assert db_path.exists()
+    assert db_path.read_text(encoding="utf-8") == "new-db"
+    assert "BEGIN" in conn.execute_calls
+    assert "COMMIT" in conn.execute_calls
+    assert any("MERGE (s:Source" in query for query, _ in conn.cypher_calls)
+    assert conn.closed is True
+
+
+def test_neo4j_adapter_smoke_executes_and_closes_resources(s2g, monkeypatch):
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeDriver:
+        def __init__(self):
+            self.closed = False
+            self.session_obj = FakeSession()
+
+        def session(self, database: str):
+            return self.session_obj
+
+        def close(self):
+            self.closed = True
+
+    class FakeGraphDatabase:
+        @staticmethod
+        def driver(uri: str, auth: Any):
+            return fake_driver
+
+    fake_driver = FakeDriver()
+
+    monkeypatch.setattr(s2g, "get_neo4j_driver_factory", lambda: FakeGraphDatabase)
+    monkeypatch.setattr(s2g, "ensure_database_exists", lambda driver, db_name, reporter: None)
+    monkeypatch.setattr(s2g, "sync_to_neo4j", lambda session, payload: None)
+    monkeypatch.setattr(s2g, "compute_metrics", lambda session, payload, reporter: None)
+
+    adapter = s2g.Neo4jBackendAdapter(
+        s2g.Neo4jConfig(uri="bolt://127.0.0.1:7687", user="neo4j", password="secret")
+    )
+    err = s2g.execute_backend_pipeline(adapter, _make_payload(s2g), DummyReporter())
+    assert err is None
+    assert fake_driver.session_obj.closed is True
+    assert fake_driver.closed is True
+
+
+def test_run_pipeline_stats_consistent_between_backends(s2g, tmp_path, monkeypatch):
+    project = tmp_path / "proj.synp"
+    project.write_text("x", encoding="utf-8")
+    cfg = tmp_path / "config.toml"
+    _write_full_config(cfg)
+    payload = _make_payload(s2g)
+
+    class FakeAdapter:
+        def __init__(self, backend_name: str):
+            self._backend_name = backend_name
+
+        @property
+        def backend_name(self) -> str:
+            return self._backend_name
+
+        def preflight(self, reporter):
+            return None
+
+        def connect(self, reporter):
+            return None
+
+        def prepare_destination(self, payload, reporter):
+            return None
+
+        def clear_destination(self, payload, reporter):
+            return None
+
+        def synchronize_payload(self, payload, reporter):
+            return None
+
+        def compute_backend_metrics(self, payload, reporter):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(s2g, "compile_project", lambda project_path, reporter: payload)
+    monkeypatch.setattr(
+        s2g,
+        "build_backend_adapter",
+        lambda backend, config, config_path, project_path: FakeAdapter(backend),
+    )
+
+    neo4j_result = s2g.run_pipeline(project, cfg, DummyReporter(), backend=s2g.BACKEND_NEO4J)
+    graphqlite_result = s2g.run_pipeline(project, cfg, DummyReporter(), backend=s2g.BACKEND_GRAPHQLITE)
+
+    assert neo4j_result.success is True
+    assert graphqlite_result.success is True
+    assert neo4j_result.stats == graphqlite_result.stats
+    assert neo4j_result.stats == {
+        "concepts": len(payload.concepts),
+        "sources": len(payload.sources),
+        "items": len(payload.items),
+        "chains": len(payload.chains),
+    }

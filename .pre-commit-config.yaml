@@ -1,0 +1,22 @@
+# Pre-commit hooks for synesis-graph.
+# Install: pip install pre-commit && pre-commit install
+# Run on all files: pre-commit run --all-files
+#
+# synesis-graph is fully lint-clean and formatted, so both ruff and
+# ruff-format are enforced. mypy runs in CI (non-blocking) for now.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.17
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict

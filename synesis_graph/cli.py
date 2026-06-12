@@ -7,12 +7,17 @@ from pathlib import Path
 
 import click
 
-from synesis_graph import __version__, SUPPORTED_BACKENDS, BACKEND_NEO4J, BACKEND_GRAPHQLITE, BACKEND_HTML
-
+from synesis_graph import (
+    BACKEND_GRAPHQLITE,
+    BACKEND_HTML,
+    BACKEND_NEO4J,
+    __version__,
+)
 
 # ---------------------------------------------------------------------------
 # Style helpers
 # ---------------------------------------------------------------------------
+
 
 def _tty() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
@@ -26,6 +31,7 @@ def _c(text: str, **kwargs) -> str:
 # Main help
 # ---------------------------------------------------------------------------
 
+
 def _build_main_help() -> str:
     title = _c("SYNESIS GRAPH", fg="green", bold=True) + f" (v{__version__})"
     desc = "Universal pipeline from Synesis projects to graph databases and visualizations."
@@ -33,26 +39,33 @@ def _build_main_help() -> str:
     usage = _c("Usage:", fg="yellow", bold=True) + " synesis-graph [OPTIONS] COMMAND [ARGUMENTS]..."
 
     groups = [
-        ("Graph Backends", [
-            ("neo4j",      "Sync project to a Neo4j database (bolt://)"),
-            ("graphqlite", "Sync project to a GraphQLite SQLite file"),
-            ("html",       "Render an interactive HTML graph visualization"),
-        ]),
+        (
+            "Graph Backends",
+            [
+                ("neo4j", "Sync project to a Neo4j database (bolt://)"),
+                ("graphqlite", "Sync project to a GraphQLite SQLite file"),
+                ("html", "Render an interactive HTML graph visualization"),
+            ],
+        ),
     ]
 
     opt_rows = [
         ("--version", "Show version and exit"),
-        ("--help",    "Show this message and exit"),
+        ("--help", "Show this message and exit"),
     ]
 
-    col = max(
-        max(len(name) for _, rows in groups for name, _ in rows),
-        max(len(name) for name, _ in opt_rows),
-    ) + 2
+    col = (
+        max(
+            max(len(name) for _, rows in groups for name, _ in rows),
+            max(len(name) for name, _ in opt_rows),
+        )
+        + 2
+    )
 
-    options = _c("Options:", fg="yellow", bold=True) + "\n" + "\n".join(
-        f"  {_c(name.ljust(col), fg='cyan')}  {desc_}"
-        for name, desc_ in opt_rows
+    options = (
+        _c("Options:", fg="yellow", bold=True)
+        + "\n"
+        + "\n".join(f"  {_c(name.ljust(col), fg='cyan')}  {desc_}" for name, desc_ in opt_rows)
     )
 
     def _render_group(label: str, rows: list[tuple[str, str]]) -> str:
@@ -61,8 +74,10 @@ def _build_main_help() -> str:
             lines.append(f"    {_c(name.ljust(col), fg='green', bold=True)}  {desc_}")
         return "\n".join(lines)
 
-    commands = _c("Commands:", fg="yellow", bold=True) + "\n\n" + "\n\n".join(
-        _render_group(label, rows) for label, rows in groups
+    commands = (
+        _c("Commands:", fg="yellow", bold=True)
+        + "\n\n"
+        + "\n\n".join(_render_group(label, rows) for label, rows in groups)
     )
 
     hint = _c(
@@ -100,8 +115,10 @@ class _SynesisGroup(click.Group):
 # Example epilog helper
 # ---------------------------------------------------------------------------
 
+
 def _ex(*lines: str) -> str:
     import re
+
     out = [_c("Examples:", fg="yellow", bold=True)]
     for line in lines:
         stripped = line.lstrip()
@@ -160,7 +177,7 @@ _EPILOG_HTML = _ex(
     "  synesis-graph html --project project.synp --output graph.html --group-by topic",
     "",
     "  # Tune filters manually:",
-    "  synesis-graph html --project project.synp --output graph.html --min-frequency 5 --max-nodes 100",
+    "  synesis-graph html --project project.synp --output graph.html --min-frequency 5 --max-nodes 100",  # noqa: E501
     "",
     "  # From pre-compiled JSON:",
     "  synesis-graph html --json export.json --output graph.html --all",
@@ -171,29 +188,38 @@ _EPILOG_HTML = _ex(
 # Shared source options (project or json, mutually exclusive)
 # ---------------------------------------------------------------------------
 
+
 def _source_options(fn):
     fn = click.option(
-        "--json", "json_input", default=None, type=click.Path(path_type=Path),
-        help="Path to a Synesis v3.0 JSON export (alternative to --project)."
+        "--json",
+        "json_input",
+        default=None,
+        type=click.Path(path_type=Path),
+        help="Path to a Synesis v3.0 JSON export (alternative to --project).",
     )(fn)
     fn = click.option(
-        "--project", default=None, type=click.Path(path_type=Path),
-        help="Path to a Synesis project file (.synp)."
+        "--project",
+        default=None,
+        type=click.Path(path_type=Path),
+        help="Path to a Synesis project file (.synp).",
     )(fn)
     return fn
 
 
 def _config_option(fn):
     return click.option(
-        "--config", default="config.toml", show_default=True,
+        "--config",
+        default="config.toml",
+        show_default=True,
         type=click.Path(path_type=Path),
-        help="Path to the TOML configuration file."
+        help="Path to the TOML configuration file.",
     )(fn)
 
 
 # ---------------------------------------------------------------------------
 # Entry point group
 # ---------------------------------------------------------------------------
+
 
 @click.group(cls=_SynesisGroup, invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="synesis-graph")
@@ -213,6 +239,7 @@ def main(ctx) -> None:
 # neo4j subcommand
 # ---------------------------------------------------------------------------
 
+
 @main.command(cls=_SynesisCommand, epilog=_EPILOG_NEO4J)
 @_source_options
 @_config_option
@@ -220,11 +247,11 @@ def main(ctx) -> None:
 def neo4j(project, json_input, config, database):
     """Sync a Synesis project to a Neo4j database."""
     _validate_source(project, json_input)
-    from synesis2graph import run_pipeline, TaskReporter
+    from synesis2graph import TaskReporter, run_pipeline
+
     reporter = TaskReporter("Synesis → Neo4j")
     html_options = None
     if database:
-        import tomllib as _toml
         # pass database override via html_options workaround not needed — TaskReporter handles it
         pass
     result = run_pipeline(
@@ -242,13 +269,15 @@ def neo4j(project, json_input, config, database):
 # graphqlite subcommand
 # ---------------------------------------------------------------------------
 
+
 @main.command(cls=_SynesisCommand, epilog=_EPILOG_GRAPHQLITE)
 @_source_options
 @_config_option
 def graphqlite(project, json_input, config):
     """Sync a Synesis project to a GraphQLite SQLite file."""
     _validate_source(project, json_input)
-    from synesis2graph import run_pipeline, TaskReporter
+    from synesis2graph import TaskReporter, run_pipeline
+
     reporter = TaskReporter("Synesis → GraphQLite")
     result = run_pipeline(
         project_path=Path(project).resolve() if project else None,
@@ -264,38 +293,96 @@ def graphqlite(project, json_input, config):
 # html subcommand
 # ---------------------------------------------------------------------------
 
+
 @main.command(cls=_SynesisCommand, epilog=_EPILOG_HTML)
 @_source_options
 @_config_option
-@click.option("--output", "html_output", default=None, type=click.Path(path_type=Path),
-              help="Output HTML file path (default: ./graph.html).")
-@click.option("--group-by", "group_by", default=None, metavar="FIELD",
-              help="Template graph field for community colouring.")
-@click.option("--min-frequency", "min_frequency", type=int, default=None, metavar="N",
-              help="Hide concepts mentioned in fewer than N items (default: 3).")
-@click.option("--min-source-count", "min_source_count", type=int, default=None, metavar="N",
-              help="Hide concepts appearing in fewer than N sources (default: 2).")
-@click.option("--max-nodes", "max_nodes", type=int, default=None, metavar="N",
-              help="Limit to top-N concepts by degree (default: 200; 0 = unlimited).")
-@click.option("--max-hyperedges", "max_hyperedges", type=int, default=None, metavar="N",
-              help="Maximum hyperedges to render (default: 50).")
-@click.option("--include-isolated", "include_isolated", is_flag=True, default=False,
-              help="Include concepts with no chain connections.")
-@click.option("--all", "html_all", is_flag=True, default=False,
-              help="Disable all filters (show every concept).")
-def html(project, json_input, config, html_output, group_by, min_frequency,
-         min_source_count, max_nodes, max_hyperedges, include_isolated, html_all):
+@click.option(
+    "--output",
+    "html_output",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Output HTML file path (default: ./graph.html).",
+)
+@click.option(
+    "--group-by",
+    "group_by",
+    default=None,
+    metavar="FIELD",
+    help="Template graph field for community colouring.",
+)
+@click.option(
+    "--min-frequency",
+    "min_frequency",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Hide concepts mentioned in fewer than N items (default: 3).",
+)
+@click.option(
+    "--min-source-count",
+    "min_source_count",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Hide concepts appearing in fewer than N sources (default: 2).",
+)
+@click.option(
+    "--max-nodes",
+    "max_nodes",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Limit to top-N concepts by degree (default: 200; 0 = unlimited).",
+)
+@click.option(
+    "--max-hyperedges",
+    "max_hyperedges",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Maximum hyperedges to render (default: 50).",
+)
+@click.option(
+    "--include-isolated",
+    "include_isolated",
+    is_flag=True,
+    default=False,
+    help="Include concepts with no chain connections.",
+)
+@click.option(
+    "--all",
+    "html_all",
+    is_flag=True,
+    default=False,
+    help="Disable all filters (show every concept).",
+)
+def html(
+    project,
+    json_input,
+    config,
+    html_output,
+    group_by,
+    min_frequency,
+    min_source_count,
+    max_nodes,
+    max_hyperedges,
+    include_isolated,
+    html_all,
+):
     """Render an interactive HTML graph visualization from a Synesis project."""
     _validate_source(project, json_input)
-    from synesis2graph import run_pipeline, TaskReporter
+    from synesis2graph import TaskReporter, run_pipeline
+
     reporter = TaskReporter("Synesis → HTML")
 
     html_options: dict = {}
     if html_output:
         html_options["output_path"] = str(html_output)
     if html_all:
-        html_options.update({"min_frequency": 0, "min_source_count": 0,
-                              "max_nodes": 0, "include_isolated": True})
+        html_options.update(
+            {"min_frequency": 0, "min_source_count": 0, "max_nodes": 0, "include_isolated": True}
+        )
     else:
         if group_by is not None:
             html_options["group_by"] = group_by
@@ -324,6 +411,7 @@ def html(project, json_input, config, html_output, group_by, min_frequency,
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
 
 def _validate_source(project, json_input) -> None:
     if not project and not json_input:

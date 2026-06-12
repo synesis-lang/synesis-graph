@@ -1,5 +1,7 @@
-# Test folder - not synced
-tests/
+# Test fixtures that are local scratch data (not needed by the test suite)
+tests/Davi_Projeto_Completo/
+tests/.vscode/
+
 .gitnexus
 .claude
 

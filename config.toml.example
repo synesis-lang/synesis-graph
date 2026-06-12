@@ -1,0 +1,56 @@
+# =============================================================================
+# Synesis Graph Configuration (template)
+# =============================================================================
+# Copy this file to `config.toml` and fill in your own credentials.
+# `config.toml` is git-ignored — never commit real credentials.
+#
+# Usage:
+#   synesis-graph neo4j --project ./project.synp --config config.toml
+#   synesis-graph graphqlite --project ./project.synp --config config.toml
+#   synesis-graph html --project ./project.synp --config config.toml
+#
+# Documentation: https://synesis-lang.github.io/synesis-docs
+# =============================================================================
+
+[neo4j]
+# Neo4j connection settings
+#
+# uri: Connection URI (bolt:// for local, neo4j+s:// for Aura)
+# user: Database username
+# password: Database password
+# database: Target database name (optional, auto-created from project name)
+
+uri = "bolt://127.0.0.1:7687"
+user = "neo4j"
+password = "CHANGE_ME"
+database = "my_corpus"  # Optional: overrides project-based naming
+
+[graphqlite]
+# GraphQLite (SQLite) connection settings
+#
+# db_path: Target SQLite database file. Supports placeholder {project}
+#          where {project} is replaced by the .synp filename stem.
+# extension_path: Optional path to a custom GraphQLite extension binary.
+
+db_path = "./graphs/{project}.db"
+# extension_path = "C:/path/to/graphqlite_extension"
+
+[html]
+# HTML graph output settings (all fields optional — sensible defaults apply)
+#
+# output_path: Output HTML file. Supports placeholder {project} (filename stem).
+# group_by:    Template graph_field used for community colouring (e.g. "topic").
+#              If omitted, the first topic-like field is used automatically.
+# min_frequency:    Hide concepts mentioned in fewer than N items (0 = no filter).
+# min_source_count: Hide concepts appearing in fewer than N sources (0 = no filter).
+# max_nodes:   Limit visible graph to top-N concepts by degree (0 = unlimited).
+# max_hyperedges: Maximum shaded-region hyperedges to render.
+# include_isolated: If true, keep concepts with no chain connections.
+
+output_path = "./graph.html"
+# group_by = "topic"
+min_frequency = 3
+min_source_count = 2
+max_nodes = 200
+max_hyperedges = 50
+include_isolated = false

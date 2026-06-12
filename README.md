@@ -1,6 +1,6 @@
 # Synesis to Neo4j: Universal Graph Pipeline
 
-[![Synesis](https://img.shields.io/badge/Synesis-Language-blue?style=for-the-badge)](https://synesis-lang.github.io/synesis-docs) ![Python](https://img.shields.io/badge/Python-3.11%2B-yellow?style=for-the-badge) ![Neo4j](https://img.shields.io/badge/Neo4j-Graph_DB-blueviolet?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
+[![Synesis](https://img.shields.io/badge/Synesis-Language-blue?style=for-the-badge)](https://synesis-lang.github.io/synesis-docs) ![Python](https://img.shields.io/badge/Python-3.10%2B-yellow?style=for-the-badge) ![Neo4j](https://img.shields.io/badge/Neo4j-Graph_DB-blueviolet?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
 > **Transform your qualitative research into a living, navigable Knowledge Graph ready for AI (GraphRAG).**
 
@@ -139,16 +139,25 @@ GDS metrics calculation automatically adapts to template type:
 
 ## Installation
 
-Requires **Python 3.11+**.
+Requires **Python 3.10+** and [synesis](https://github.com/synesis-lang/synesis) ≥ 0.5.5.
 
 ```bash
 # Clone the repository
-git clone https://github.com/synesis-lang/synesis2neo4j.git
-cd synesis2neo4j
+git clone https://github.com/synesis-lang/synesis-graph.git
+cd synesis-graph
 
-# Install dependencies
-pip install synesis neo4j rich tomli
+# Install (editable) with the graph backends you need
+pip install -e ".[neo4j]"
 ```
+
+### Compatibility matrix
+
+| Package | This version | Requires `synesis` | Python |
+|---|---|---|---|
+| synesis | 0.5.5 | — | ≥3.10 |
+| synesis-coder | 0.4.1 | ≥0.5.5 | ≥3.10 |
+| synesis-lsp | 0.15.4 | ≥0.5.5 | ≥3.10 |
+| synesis-graph | 0.2.0 | ≥0.5.5 | ≥3.10 |
 
 ### GDS Plugin (Optional)
 
