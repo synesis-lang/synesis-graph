@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed — GraphQLite backend
 
-- **The `graphqlite` backend was removed.**.
+- **The `graphqlite` backend was removed.** It never worked and will not be
+  implemented. Keeping it meant advertising a third export target in `--help`,
+  in the config file, and in the public API that silently failed the moment
+  anyone selected it — worse than not offering it at all.
 - Removed: the `graphqlite` subcommand, `GraphQLiteBackendAdapter`,
   `GraphQLiteConfig`, `sync_to_graphqlite`, `compute_metrics_graphqlite`,
   `_GraphQLiteQueryRunner`, `get_graphqlite_connect_factory`,

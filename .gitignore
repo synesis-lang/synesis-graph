@@ -1,4 +1,7 @@
-# Test fixtures that are local scratch data (not needed by the test suite)
+# Corpus de campo usado por alguns testes de merge_payloads — dados de
+# pesquisa de terceiros (61 entrevistas, ~12 MB), nunca versionados. Os
+# testes que dependem dele pulam quando ausente (@requires_davi em
+# tests/test_linkage.py). Copia de trabalho em case-studies/Projeto_Davi/.
 tests/Davi_Projeto_Completo/
 tests/.vscode/
 

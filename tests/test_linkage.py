@@ -475,6 +475,18 @@ def test_constraints_without_entities_unchanged():
 
 DAVI = Path(__file__).parent / "Davi_Projeto_Completo" / "Davi.synp"
 
+# O corpus Davi (61 entrevistas, ~12 MB de dados de campo de terceiros) NAO e
+# versionado — esta em .gitignore por ser dado de pesquisa, nao fixture. Os
+# testes abaixo exercitam merge_payloads no pior caso de colisao (o MESMO
+# projeto sob dois aliases) e precisam de um projeto real, grande o bastante
+# para que colisoes de id apareçam. Quando o corpus nao esta presente eles
+# pulam, em vez de derrubar a suite: foi o que quebrou os 9 jobs da matriz no
+# run 31451713665 (238 passaram, 6 erraram por FileNotFoundError no setup).
+requires_davi = pytest.mark.skipif(
+    not DAVI.exists(),
+    reason="corpus Davi_Projeto_Completo nao disponivel (dados de campo, nao versionados)",
+)
+
 
 def _build_davi():
     from synesis_graph.core import _build_graph_payload, analyze_template
@@ -508,12 +520,14 @@ def merged_twins():
     return merged, counts
 
 
+@requires_davi
 def test_merge_preserves_all_items_and_sources(merged_twins):
     merged, counts = merged_twins
     assert len(merged.items) == 2 * counts["items"]
     assert len(merged.sources) == 2 * counts["sources"]
 
 
+@requires_davi
 def test_merge_produces_no_id_collisions(merged_twins):
     merged, _counts = merged_twins
     item_ids = [i["item_id"] for i in merged.items]
@@ -522,6 +536,7 @@ def test_merge_produces_no_id_collisions(merged_twins):
     assert len(set(bibtexs)) == len(bibtexs)
 
 
+@requires_davi
 def test_merge_qualifies_by_alias(merged_twins):
     merged, _counts = merged_twins
     bibtexs = {s["bibtex"] for s in merged.sources}
@@ -529,12 +544,14 @@ def test_merge_qualifies_by_alias(merged_twins):
     assert "beta:@entrevista01" in bibtexs
 
 
+@requires_davi
 def test_merge_unifies_concepts_by_name(merged_twins):
     """Membros de um estudo compartilham o vocabulario — conceito nao duplica."""
     merged, counts = merged_twins
     assert len(merged.concepts) == counts["concepts"]
 
 
+@requires_davi
 def test_merge_keeps_from_source_consistent(merged_twins):
     """Arestas Item->Source continuam apontando para ids que existem."""
     merged, _counts = merged_twins
@@ -545,6 +562,7 @@ def test_merge_keeps_from_source_consistent(merged_twins):
         assert fs["ref"] in bibtexs
 
 
+@requires_davi
 def test_merge_without_modifiers_reifies_nothing(merged_twins):
     """NAO-REGRESSAO: projeto sem IDENTIFIES/REFERS TO nao produz entidade."""
     merged, _counts = merged_twins
