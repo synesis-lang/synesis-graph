@@ -46,6 +46,9 @@ dev = [
     # tests/test_packaging.py le o CITATION.cff para conferir se a versao nao
     # divergiu do pyproject — ja aconteceu duas vezes no ecossistema.
     "pyyaml>=6.0",
+    # tomllib e stdlib em >=3.11; no piso 3.10 (coberto pela matriz do CI) o
+    # mesmo teste precisa de tomli para ler o pyproject.
+    "tomli>=2.0 ; python_version < '3.11'",
     "ruff==0.16.1",
     "mypy==2.3.0",
     "synesis>=0.10.0",

@@ -32,8 +32,17 @@ REPO_ROOT = Path(__file__).parent.parent
 
 
 def _declared_version() -> str:
-    """Versao do pyproject.toml — a fonte unica de verdade."""
-    import tomllib
+    """Versao do pyproject.toml — a fonte unica de verdade.
+
+    `tomllib` so entrou na stdlib no 3.11, mas o pacote declara
+    `requires-python = ">=3.10"` e o CI roda a matriz nos tres. Sem este
+    fallback os testes de versao quebram apenas no piso — foi o que derrubou
+    3 dos 9 jobs no run 31452586097.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
 
     with open(REPO_ROOT / "pyproject.toml", "rb") as fh:
         return tomllib.load(fh)["project"]["version"]
