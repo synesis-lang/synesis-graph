@@ -35,6 +35,31 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
   teste de consistência entre backends passa a comparar Neo4j com HTML,
   preservando sua intenção original.
 
+### Adicionado — contrato de empacotamento (pré-PyPI)
+
+- **`tests/test_packaging.py`** (10 testes) — constrói o sdist de verdade e
+  inspeciona o `PKG-INFO` gerado, em vez de confiar no que o `pyproject.toml`
+  declara. Publicar no PyPI é irreversível: o nome fica reservado para sempre e
+  uma versão enviada nunca pode ser sobrescrita, então um erro de embalagem
+  custa queimar o número da versão.
+  - Licença: `License-Expression` PEP 639 correta, **ausência** do campo
+    obsoleto `License:`, e ambos os arquivos (`LICENSE`, `LICENSE.exception`)
+    declarados **e** empacotados — a exceção só vale se o arquivo dela viajar
+    junto.
+  - Conteúdo: template HTML e shim legado presentes; nenhum `config.toml`
+    (carrega senha real), `.db`, `.html` ou `.env` no artefato.
+  - Consistência: versão do sdist, do `CITATION.cff` e do `CHANGELOG.md`
+    conferidas contra o `pyproject.toml` — o CFF defasado já aconteceu duas
+    vezes no ecossistema.
+  - Verificado por mutação: trocando a licença pela sintaxe legada
+    `{text = "..."}`, os testes falham. O `twine check` **passa** nesse cenário —
+    por isso ele não basta, e é a causa provável do `license: None` que o PyPI
+    hoje mostra para `synesis` e `synesis-lsp`.
+- `pyyaml` acrescentado ao extra `dev` (o teste lê o `CITATION.cff`).
+- **`pypa/gh-action-pypi-publish` pinada por SHA** — era a única action ainda em
+  ref mutável (`@release/v1`) neste repositório, justamente a que tem permissão
+  de publicar.
+
 ### Segurança
 
 - **Todas as GitHub Actions passam a ser pinadas por SHA de commit**

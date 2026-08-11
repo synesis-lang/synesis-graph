@@ -43,6 +43,9 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "build>=0.10",
+    # tests/test_packaging.py le o CITATION.cff para conferir se a versao nao
+    # divergiu do pyproject — ja aconteceu duas vezes no ecossistema.
+    "pyyaml>=6.0",
     "ruff==0.16.1",
     "mypy==2.3.0",
     "synesis>=0.10.0",
