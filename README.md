@@ -1,6 +1,6 @@
-# Synesis to Neo4j: Universal Graph Pipeline
+# synesis-graph: Universal Graph Pipeline
 
-[![Synesis](https://img.shields.io/badge/Synesis-Language-blue?style=for-the-badge)](https://synesis-lang.github.io/synesis-docs) ![Python](https://img.shields.io/badge/Python-3.10%2B-yellow?style=for-the-badge) ![Neo4j](https://img.shields.io/badge/Neo4j-Graph_DB-blueviolet?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
+[![Synesis](https://img.shields.io/badge/Synesis-Language-blue?style=for-the-badge)](https://synesis-lang.github.io/synesis-docs) ![Python](https://img.shields.io/badge/Python-3.10%2B-yellow?style=for-the-badge) ![Backends](https://img.shields.io/badge/Backends-Neo4j%20%7C%20HTML-blueviolet?style=for-the-badge) ![License](https://img.shields.io/badge/License-AGPL%20v3%20%2B%20exception-green?style=for-the-badge)
 
 > **Transform your qualitative research into a living, navigable Knowledge Graph ready for AI (GraphRAG).**
 
@@ -8,7 +8,9 @@
 
 **Documentation:** [Synesis Language Docs](https://synesis-lang.github.io/synesis-docs)
 
-This repository contains the official ingestion pipeline from the **Synesis** language to **Neo4j** graph databases. It acts as a bridge between structured human analysis (`.syn` files) and computational intelligence, enabling MCP Agents and Data Science algorithms to interact with your research.
+This repository contains the official pipeline from the **Synesis** language to graph representations. It acts as a bridge between structured human analysis (`.syn` files) and computational intelligence, enabling MCP Agents and Data Science algorithms to interact with your research.
+
+Two backends ship today — **Neo4j** (property graph, with GDS metrics) and **HTML** (self-contained interactive visualization). Both are built on the same `BackendAdapter` contract, so support for further graph databases can be added without touching the pipeline.
 
 ---
 
@@ -139,7 +141,7 @@ GDS metrics calculation automatically adapts to template type:
 
 ## Installation
 
-Requires **Python 3.10+** and [synesis](https://github.com/synesis-lang/synesis) ≥ 0.5.5.
+Requires **Python 3.10+** and [synesis](https://github.com/synesis-lang/synesis) ≥ 0.10.0.
 
 ```bash
 # Clone the repository
@@ -154,10 +156,10 @@ pip install -e ".[neo4j]"
 
 | Package | This version | Requires `synesis` | Python |
 |---|---|---|---|
-| synesis | 0.5.5 | — | ≥3.10 |
-| synesis-coder | 0.4.1 | ≥0.5.5 | ≥3.10 |
-| synesis-lsp | 0.15.4 | ≥0.5.5 | ≥3.10 |
-| synesis-graph | 0.2.0 | ≥0.5.5 | ≥3.10 |
+| synesis | 0.11.0 | — | ≥3.10 |
+| synesis-coder | 0.8.0 | ≥0.10.0 | ≥3.10 |
+| synesis-lsp | 0.22.0 | ≥0.10.0 | ≥3.10 |
+| synesis-graph | 0.5.0 | ≥0.10.0 | ≥3.10 |
 
 ### GDS Plugin (Optional)
 
@@ -186,16 +188,23 @@ database = "neo4j"             # Optional, default is 'neo4j'
 
 ## Usage
 
-Run the script pointing to the Synesis project file (`.synp`):
+Pick a backend and point it at the Synesis project file (`.synp`):
 
 ```bash
-python synesis2neo4j.py --project ./my-project/analysis.synp
+# Sync to Neo4j
+synesis-graph neo4j --project ./my-project/analysis.synp
+
+# Render a self-contained interactive HTML graph
+synesis-graph html --project ./my-project/analysis.synp --output graph.html
+
+# See every backend and its options
+synesis-graph --help
 ```
 
 ### What happens during execution?
 
-1. **Compilation:** The Synesis compiler validates your code. Syntax errors are displayed and the process stops (database is not touched).
-2. **Connection:** If compilation succeeds, the script connects to Neo4j.
+1. **Compilation:** The Synesis compiler validates your code. Syntax errors are displayed and the process stops (the destination is not touched).
+2. **Connection:** If compilation succeeds, the pipeline connects to the selected backend.
 3. **Constraints:** Uniqueness rules are applied based on the Template.
 4. **Synchronization:** Data is injected (Concepts, Citations, Sources, Relationships).
 5. **Native Metrics:** Calculated via pure Cypher.
@@ -359,7 +368,29 @@ graph TD
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+This program is distributed under the **GNU Affero General Public License,
+version 3 only (AGPL-3.0-only), with the Synesis Data-Output Exception** — see
+[LICENSE](LICENSE) and [LICENSE.exception](LICENSE.exception).
+
+SPDX identifier: `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception`
+
+**The graphs you generate are yours.** Exported artifacts — Cypher scripts,
+Neo4j databases, and the standalone HTML visualization — are **not** covered by
+the AGPL and carry no copyleft obligation toward Synesis.
+
+This matters especially here: the generated HTML **embeds Synesis's own
+JavaScript and CSS** so the visualization can render standalone. That embedded
+material is *Synesis Runtime Material* under the Exception, and it does **not**
+place the generated file under the AGPL. You may publish, sell, or license the
+HTML you generate under any terms you choose.
+
+The AGPL applies to synesis-graph itself: if you modify it and distribute it,
+or run it as a network service, you must share your changes under the AGPL.
+
+Releases published before this change remain available under the MIT license
+they were issued under.
+
+This license grants no rights to the "Synesis" name or logo.
 
 ---
 

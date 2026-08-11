@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 class _DummyStep:
@@ -37,9 +39,6 @@ def _write_full_config(path: Path) -> None:
 uri = "bolt://127.0.0.1:7687"
 user = "neo4j"
 password = "secret"
-
-[graphqlite]
-db_path = "./graphs/{project}.db"
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -65,31 +64,12 @@ def _make_payload(s2g: Any):
     )
 
 
-def test_load_config_missing_graphqlite_section_returns_error(s2g, tmp_path):
-    cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        """
-[neo4j]
-uri = "bolt://127.0.0.1:7687"
-user = "neo4j"
-password = "secret"
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-    result = s2g.load_config(cfg, s2g.BACKEND_GRAPHQLITE)
-    assert isinstance(result, s2g.ConnectionError)
-    assert result.stage == "config"
-    assert "[graphqlite]" in (result.details or "")
-
-
 def test_load_config_missing_neo4j_section_returns_error(s2g, tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         """
-[graphqlite]
-db_path = "./graphs/{project}.db"
+[html]
+output_path = "./graph.html"
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -119,7 +99,8 @@ def test_neo4j_adapter_connect_failure_returns_connection_error(s2g, monkeypatch
         def driver(uri: str, auth: Any):
             raise RuntimeError("auth failed")
 
-    monkeypatch.setattr(s2g, "get_neo4j_driver_factory", lambda: FakeGraphDatabase)
+    import synesis_graph.backends.base as _base
+    monkeypatch.setattr(_base, "get_neo4j_driver_factory", lambda: FakeGraphDatabase)
     adapter = s2g.Neo4jBackendAdapter(
         s2g.Neo4jConfig(uri="bolt://127.0.0.1:7687", user="neo4j", password="wrong")
     )
@@ -128,81 +109,6 @@ def test_neo4j_adapter_connect_failure_returns_connection_error(s2g, monkeypatch
     assert isinstance(err, s2g.ConnectionError)
     assert err.stage == "connection"
     assert "auth failed" in (err.details or "")
-
-
-def test_graphqlite_adapter_invalid_directory_path_returns_config_error(s2g, tmp_path, monkeypatch):
-    project = tmp_path / "proj.synp"
-    project.write_text("x", encoding="utf-8")
-    cfg = tmp_path / "config.toml"
-    _write_full_config(cfg)
-
-    db_dir = tmp_path / "graph.db"
-    db_dir.mkdir()
-
-    adapter = s2g.GraphQLiteBackendAdapter(
-        s2g.GraphQLiteConfig(db_path=str(db_dir)),
-        config_path=cfg,
-        project_path=project,
-    )
-    assert adapter.preflight(DummyReporter()) is None
-    monkeypatch.setattr(s2g, "get_graphqlite_connect_factory", lambda: (lambda *args, **kwargs: None))
-
-    err = adapter.connect(DummyReporter())
-    assert isinstance(err, s2g.ConnectionError)
-    assert err.stage == "config"
-    assert "directory" in (err.details or "").lower()
-
-
-def test_graphqlite_adapter_smoke_recreates_db_and_syncs(s2g, tmp_path, monkeypatch):
-    class FakeGraphQLiteConn:
-        def __init__(self):
-            self.cypher_calls = []
-            self.execute_calls = []
-            self.closed = False
-
-        def cypher(self, query: str, params: Optional[dict] = None):
-            self.cypher_calls.append((query, params))
-            return []
-
-        def execute(self, sql: str):
-            self.execute_calls.append(sql)
-            return None
-
-        def close(self):
-            self.closed = True
-
-    project = tmp_path / "proj.synp"
-    project.write_text("x", encoding="utf-8")
-    cfg = tmp_path / "config.toml"
-    _write_full_config(cfg)
-
-    db_path = tmp_path / "graphs" / "proj.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    db_path.write_text("old-db", encoding="utf-8")
-
-    conn = FakeGraphQLiteConn()
-
-    def fake_connect(path: str, extension_path: Optional[str] = None):
-        Path(path).write_text("new-db", encoding="utf-8")
-        return conn
-
-    monkeypatch.setattr(s2g, "get_graphqlite_connect_factory", lambda: fake_connect)
-
-    adapter = s2g.GraphQLiteBackendAdapter(
-        s2g.GraphQLiteConfig(db_path=str(db_path)),
-        config_path=cfg,
-        project_path=project,
-    )
-    assert adapter.preflight(DummyReporter()) is None
-
-    err = s2g.execute_backend_pipeline(adapter, _make_payload(s2g), DummyReporter())
-    assert err is None
-    assert db_path.exists()
-    assert db_path.read_text(encoding="utf-8") == "new-db"
-    assert "BEGIN" in conn.execute_calls
-    assert "COMMIT" in conn.execute_calls
-    assert any("MERGE (s:Source" in query for query, _ in conn.cypher_calls)
-    assert conn.closed is True
 
 
 def test_neo4j_adapter_smoke_executes_and_closes_resources(s2g, monkeypatch):
@@ -231,10 +137,15 @@ def test_neo4j_adapter_smoke_executes_and_closes_resources(s2g, monkeypatch):
 
     fake_driver = FakeDriver()
 
-    monkeypatch.setattr(s2g, "get_neo4j_driver_factory", lambda: FakeGraphDatabase)
-    monkeypatch.setattr(s2g, "ensure_database_exists", lambda driver, db_name, reporter: None)
-    monkeypatch.setattr(s2g, "sync_to_neo4j", lambda session, payload: None)
-    monkeypatch.setattr(s2g, "compute_metrics", lambda session, payload, reporter: None)
+    import synesis_graph.backends.base as _base
+    monkeypatch.setattr(_base, "get_neo4j_driver_factory", lambda: FakeGraphDatabase)
+    monkeypatch.setattr(
+        _base,
+        "ensure_database_exists",
+        lambda driver, db_name, reporter, default_database="neo4j": (db_name, None),
+    )
+    monkeypatch.setattr(_base, "sync_to_neo4j", lambda session, payload: None)
+    monkeypatch.setattr(_base, "compute_metrics", lambda session, payload, reporter: None)
 
     adapter = s2g.Neo4jBackendAdapter(
         s2g.Neo4jConfig(uri="bolt://127.0.0.1:7687", user="neo4j", password="secret")
@@ -243,6 +154,138 @@ def test_neo4j_adapter_smoke_executes_and_closes_resources(s2g, monkeypatch):
     assert err is None
     assert fake_driver.session_obj.closed is True
     assert fake_driver.closed is True
+
+
+def _fake_neo4j(monkeypatch, s2g, captured):
+    """Instala fakes de Neo4j e captura o database passado ao driver.session()."""
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeDriver:
+        def __init__(self):
+            self.closed = False
+            self.session_obj = FakeSession()
+
+        def session(self, database: str):
+            captured["db"] = database
+            return self.session_obj
+
+        def close(self):
+            self.closed = True
+
+    class FakeGraphDatabase:
+        @staticmethod
+        def driver(uri: str, auth: Any):
+            return FakeDriver()
+
+    import synesis_graph.backends.base as _base
+    monkeypatch.setattr(_base, "get_neo4j_driver_factory", lambda: FakeGraphDatabase)
+    monkeypatch.setattr(
+        _base,
+        "ensure_database_exists",
+        lambda driver, db_name, reporter, default_database="neo4j": (db_name, None),
+    )
+    monkeypatch.setattr(_base, "sync_to_neo4j", lambda session, payload: None)
+    monkeypatch.setattr(_base, "compute_metrics", lambda session, payload, reporter: None)
+
+
+def test_prepare_destination_derives_db_name_from_project_name(s2g, monkeypatch):
+    """O nome do banco Neo4j vem de payload.project_name, sanitizado."""
+    captured: dict = {}
+    _fake_neo4j(monkeypatch, s2g, captured)
+
+    adapter = s2g.Neo4jBackendAdapter(
+        s2g.Neo4jConfig(uri="bolt://127.0.0.1:7687", user="neo4j", password="secret")
+    )
+    payload = _make_payload(s2g)
+    payload.project_name = "Quinto_Andar"
+    assert adapter.connect(DummyReporter()) is None
+    assert adapter.prepare_destination(payload, DummyReporter()) is None
+    # underscore -> hifen (regra do Neo4j), minusculo
+    assert adapter.db_name == "quinto-andar"
+    assert captured["db"] == "quinto-andar"
+
+
+def test_database_flag_overrides_project_name(s2g, tmp_path, monkeypatch):
+    """--database Quinto_Andar sobrescreve payload.project_name -> nomeia o agregado.
+
+    Sem --database, o payload mantem o nome derivado (aqui 'lattes_abstracts',
+    injetado pelo mock); com --database, run_pipeline o substitui e o banco Neo4j
+    resulta 'quinto-andar' (sanitizado).
+    """
+    import synesis_graph.pipeline as _pipe
+    from synesis_graph.pipeline import run_pipeline
+
+    captured: dict = {}
+    _fake_neo4j(monkeypatch, s2g, captured)
+
+    cfg = tmp_path / "config.toml"
+    _write_full_config(cfg)
+
+    # Evita o compilador real (dummy no fixture s2g): devolve um payload pronto,
+    # simulando o resultado do link step com nome derivado dos membros.
+    def fake_compile_and_link(project_paths, reporter):
+        payload = _make_payload(s2g)
+        payload.project_name = "lattes_abstracts"
+        return payload
+
+    monkeypatch.setattr(_pipe, "_compile_and_link", fake_compile_and_link)
+
+    p1 = tmp_path / "lattes.synp"
+    p2 = tmp_path / "abstracts.synp"
+    p1.write_text("x", encoding="utf-8")
+    p2.write_text("x", encoding="utf-8")
+
+    result = run_pipeline(
+        project_path=p1,
+        config_path=cfg,
+        reporter=DummyReporter(),
+        backend="neo4j",
+        database="Quinto_Andar",
+        extra_projects=[p2],
+    )
+    assert result.success, result.error
+    assert captured["db"] == "quinto-andar"
+
+
+def test_no_database_flag_keeps_derived_name(s2g, tmp_path, monkeypatch):
+    """Sem --database, o nome derivado (dos membros) e preservado."""
+    import synesis_graph.pipeline as _pipe
+    from synesis_graph.pipeline import run_pipeline
+
+    captured: dict = {}
+    _fake_neo4j(monkeypatch, s2g, captured)
+
+    cfg = tmp_path / "config.toml"
+    _write_full_config(cfg)
+
+    def fake_compile_and_link(project_paths, reporter):
+        payload = _make_payload(s2g)
+        payload.project_name = "lattes_abstracts"
+        return payload
+
+    monkeypatch.setattr(_pipe, "_compile_and_link", fake_compile_and_link)
+
+    p1 = tmp_path / "lattes.synp"
+    p2 = tmp_path / "abstracts.synp"
+    p1.write_text("x", encoding="utf-8")
+    p2.write_text("x", encoding="utf-8")
+
+    result = run_pipeline(
+        project_path=p1,
+        config_path=cfg,
+        reporter=DummyReporter(),
+        backend="neo4j",
+        database=None,
+        extra_projects=[p2],
+    )
+    assert result.success, result.error
+    assert captured["db"] == "lattes-abstracts"  # derivado, sanitizado
 
 
 def test_run_pipeline_stats_consistent_between_backends(s2g, tmp_path, monkeypatch):
@@ -281,19 +324,20 @@ def test_run_pipeline_stats_consistent_between_backends(s2g, tmp_path, monkeypat
         def close(self):
             return None
 
-    monkeypatch.setattr(s2g, "compile_project", lambda project_path, reporter: payload)
+    import synesis_graph.pipeline as _pipeline
+    monkeypatch.setattr(_pipeline, "compile_project", lambda project_path, reporter: payload)
     monkeypatch.setattr(
-        s2g,
+        _pipeline,
         "build_backend_adapter",
         lambda backend, config, config_path, project_path: FakeAdapter(backend),
     )
 
     neo4j_result = s2g.run_pipeline(project, cfg, DummyReporter(), backend=s2g.BACKEND_NEO4J)
-    graphqlite_result = s2g.run_pipeline(project, cfg, DummyReporter(), backend=s2g.BACKEND_GRAPHQLITE)
+    html_result = s2g.run_pipeline(project, cfg, DummyReporter(), backend=s2g.BACKEND_HTML)
 
     assert neo4j_result.success is True
-    assert graphqlite_result.success is True
-    assert neo4j_result.stats == graphqlite_result.stats
+    assert html_result.success is True
+    assert neo4j_result.stats == html_result.stats
     assert neo4j_result.stats == {
         "concepts": len(payload.concepts),
         "sources": len(payload.sources),

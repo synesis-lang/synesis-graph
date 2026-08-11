@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synesis2neo4j** (269 symbols, 750 relationships, 23 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synesis-graph** (729 symbols, 2099 relationships, 62 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -17,7 +17,7 @@ This project is indexed by GitNexus as **synesis2neo4j** (269 symbols, 750 relat
 
 1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
 2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/synesis2neo4j/process/{processName}` — trace the full execution flow step by step
+3. `READ gitnexus://repo/synesis-graph/process/{processName}` — trace the full execution flow step by step
 4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
 
 ## When Refactoring
@@ -56,10 +56,10 @@ This project is indexed by GitNexus as **synesis2neo4j** (269 symbols, 750 relat
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/synesis2neo4j/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/synesis2neo4j/clusters` | All functional areas |
-| `gitnexus://repo/synesis2neo4j/processes` | All execution flows |
-| `gitnexus://repo/synesis2neo4j/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/synesis-graph/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/synesis-graph/clusters` | All functional areas |
+| `gitnexus://repo/synesis-graph/processes` | All execution flows |
+| `gitnexus://repo/synesis-graph/process/{name}` | Step-by-step execution trace |
 
 ## Self-Check Before Finishing
 

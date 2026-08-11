@@ -2,6 +2,7 @@
 tests/Davi_Projeto_Completo/
 tests/.vscode/
 
+# Tool indexes
 .gitnexus
 .claude
 
@@ -9,10 +10,46 @@ tests/.vscode/
 *.html
 graphs/
 
-# Config with credentials
+# Credentials — NEVER commit
 config.toml
+.env
+*.env
+!.env.example
+*.key
+*_api_token.txt
+*_api_key.txt
 
 # Build artifacts
 *.egg-info/
+dist/
+build/
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local docs
+AGENTS.md
+CLAUDE.md

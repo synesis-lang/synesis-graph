@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "synesis-graph"
-version = "0.2.0"
+version = "0.5.0"
 description = "Universal pipeline from Synesis projects to graph databases and HTML visualizations"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception"
+license-files = ["LICENSE", "LICENSE.exception"]
 authors = [
     {name = "De Britto, Christian Maciel", email = "chriseana@gmail.com"}
 ]
@@ -32,14 +33,20 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "synesis>=0.5.5",
+    "synesis>=0.10.0",
     "click>=8.0",
 ]
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
-graphqlite = ["graphqlite"]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff==0.15.17", "mypy==1.15.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "build>=0.10",
+    "ruff==0.16.1",
+    "mypy==2.3.0",
+    "synesis>=0.10.0",
+]
 
 [project.urls]
 Repository = "https://github.com/synesis-lang/synesis-graph"
@@ -52,8 +59,18 @@ synesis-graph = "synesis_graph.cli:main"
 where = ["."]
 include = ["synesis_graph*"]
 
+[tool.setuptools]
+py-modules = ["synesis2graph"]
+
+[tool.setuptools.package-data]
+synesis_graph = ["../templates/*.tmpl"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore:module 'sre_parse' is deprecated:DeprecationWarning",
+    "ignore:module 'sre_constants' is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
@@ -61,6 +78,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = ["F541"]
 
 [tool.mypy]
 python_version = "3.10"

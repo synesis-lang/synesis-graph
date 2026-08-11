@@ -6,7 +6,6 @@
 #
 # Usage:
 #   synesis-graph neo4j --project ./project.synp --config config.toml
-#   synesis-graph graphqlite --project ./project.synp --config config.toml
 #   synesis-graph html --project ./project.synp --config config.toml
 #
 # Documentation: https://synesis-lang.github.io/synesis-docs
@@ -24,16 +23,6 @@ uri = "bolt://127.0.0.1:7687"
 user = "neo4j"
 password = "CHANGE_ME"
 database = "my_corpus"  # Optional: overrides project-based naming
-
-[graphqlite]
-# GraphQLite (SQLite) connection settings
-#
-# db_path: Target SQLite database file. Supports placeholder {project}
-#          where {project} is replaced by the .synp filename stem.
-# extension_path: Optional path to a custom GraphQLite extension binary.
-
-db_path = "./graphs/{project}.db"
-# extension_path = "C:/path/to/graphqlite_extension"
 
 [html]
 # HTML graph output settings (all fields optional — sensible defaults apply)

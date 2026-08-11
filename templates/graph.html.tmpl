@@ -7,87 +7,122 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg:       #0f0f1a;
-    --panel:    #1a1a2e;
-    --border:   #2a2a4e;
-    --track:    #3a3a5e;
-    --text:     #e0e0e0;
-    --text-dim: #aaa;
-    --muted:    #777;
-    --inactive: #555;
-    --accent:   #4E79A7;
-    --item-hover: #2a2a4e;
+    --bg:         #F7F4EF;
+    --panel:      #FFFFFF;
+    --border:     #E5E1DA;
+    --track:      #C8C4BC;
+    --text:       #1C1C1E;
+    --text-dim:   #3A3A3C;
+    --muted:      #6B6B70;
+    --inactive:   #AEAEB2;
+    --accent:     #1A3A5C;
+    --accent-h:   #3D5A7A;
+    --amber:      #C8963A;
+    --item-hover: #EDE9E2;
   }
-  body.light {
-    --bg:       #f4f4f8;
-    --panel:    #ffffff;
-    --border:   #d0d0e0;
-    --track:    #c0c0d0;
-    --text:     #1a1a2e;
-    --text-dim: #444;
-    --muted:    #666;
-    --inactive: #999;
-    --accent:   #2c5f8a;
-    --item-hover: #e8e8f0;
+  body.dark {
+    --bg:         #0f0f1a;
+    --panel:      #1a1a2e;
+    --border:     #2a2a4e;
+    --track:      #3a3a5e;
+    --text:       #e0e0e0;
+    --text-dim:   #aaa;
+    --muted:      #777;
+    --inactive:   #555;
+    --accent:     #7BB8E8;
+    --accent-h:   #A0CBE8;
+    --amber:      #C8963A;
+    --item-hover: #2a2a4e;
   }
   body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; display: flex; height: 100vh; overflow: hidden; }
   #graph { flex: 1; min-width: 0; background: var(--bg); transition: background .2s; }
   #resize-handle { width: 5px; background: var(--panel); border-left: 1px solid var(--border); cursor: col-resize; flex-shrink: 0; transition: background .15s; }
   #resize-handle:hover, #resize-handle.dragging { background: var(--accent); }
-  #sidebar { width: 280px; min-width: 180px; max-width: 560px; background: var(--panel); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  #sidebar { width: 560px; min-width: 180px; max-width: 720px; background: var(--panel); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
   #search-wrap { padding: 12px; border-bottom: 1px solid var(--border); }
   #search { width: 100%; background: var(--bg); border: 1px solid var(--track); color: var(--text); padding: 7px 10px; border-radius: 6px; font-size: 13px; outline: none; }
   #search:focus { border-color: var(--accent); }
   #search-results { max-height: 140px; overflow-y: auto; padding: 4px 12px; border-bottom: 1px solid var(--border); display: none; }
   .search-item { padding: 4px 6px; cursor: pointer; border-radius: 4px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .search-item:hover { background: var(--item-hover); }
-  #info-panel { flex: 0 1 auto; max-height: 45vh; overflow-y: auto; padding: 14px; border-bottom: 1px solid var(--border); }
+  /* B+C: info-panel takes remaining space; meta shrinks to content, table fills the rest */
+  #info-panel { flex: 1 1 0; min-height: 60px; display: flex; flex-direction: column; border-bottom: 1px solid var(--border); overflow: hidden; }
   #info-panel h3 { font-size: 11px; color: var(--muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
+  #info-meta { overflow-y: auto; overflow-x: hidden; padding: 14px; flex-shrink: 0; }
+  #info-table { overflow-x: auto; overflow-y: auto; flex: 1 1 0; min-height: 0; }
+  #info-table:not(:empty) { border-top: 1px solid var(--border); }
   #info-content { font-size: 13px; color: var(--text-dim); line-height: 1.6; }
-  #info-content .field { margin-bottom: 8px; }
+  #info-content .field { margin-bottom: 6px; }
   #info-content .field b { color: var(--text); display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; margin-bottom: 1px; }
   #info-content .field-val { color: var(--text-dim); }
   #info-content .field-inline b { display: inline; font-size: 13px; text-transform: none; letter-spacing: 0; opacity: 1; }
   #info-content .empty { color: var(--inactive); font-style: italic; }
+  /* E: two-column grid for short metadata fields */
+  .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; margin-bottom: 6px; }
+  .field-grid .field { margin-bottom: 4px; }
   .neighbor-link { display: block; padding: 2px 6px; margin: 2px 0; border-radius: 3px; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-left: 3px solid var(--track); }
   .neighbor-link:hover { background: var(--item-hover); }
-  #neighbors-list { max-height: 160px; overflow-y: auto; margin-top: 4px; }
-  #legend-wrap { flex: 1; overflow-y: hidden; display: flex; flex-direction: column; min-height: 0; }
+  #neighbors-list { max-height: 120px; overflow-y: auto; margin-top: 4px; }
+  /* A: collapsible long description */
+  .field-desc { margin-bottom: 6px; }
+  .field-desc b { color: var(--text); display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; margin-bottom: 2px; }
+  .desc-text { color: var(--text-dim); font-size: 12px; line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+  .desc-text.expanded { display: block; -webkit-line-clamp: unset; }
+  .desc-toggle { background: none; border: none; color: var(--accent); font-size: 10px; cursor: pointer; padding: 1px 0; font-family: inherit; }
+  .desc-toggle:hover { color: var(--accent-h); }
+  /* B: collapsible accordion sections for degree and legend */
+  .accordion-hdr { display: flex; justify-content: space-between; align-items: center; padding: 7px 14px; border-bottom: 1px solid var(--border); cursor: pointer; flex-shrink: 0; user-select: none; background: var(--panel); }
+  .accordion-hdr span { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .accordion-hdr .acc-caret { font-size: 10px; color: var(--inactive); transition: transform .15s; }
+  .accordion-hdr.open .acc-caret { transform: rotate(180deg); }
+  .accordion-body { overflow: hidden; transition: max-height .2s ease; }
+  .accordion-body.collapsed { max-height: 0 !important; }
+  #legend-wrap { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
   #grouping-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   #grouping-tabs:empty { display: none; }
   .g-tab { font-size: 10px; padding: 3px 10px; border-radius: 10px; cursor: pointer; border: 1px solid var(--track); background: transparent; color: var(--text-dim); font-family: inherit; transition: all .15s; white-space: nowrap; }
   .g-tab:hover { border-color: var(--accent); color: var(--text); }
   .g-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-  #legend-inner { flex: 1; overflow-y: auto; padding: 10px 12px; min-height: 0; }
-  .legend-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; border-radius: 4px; font-size: 12px; }
+  #legend-inner { overflow-y: auto; padding: 10px 12px; flex: 1 1 0; min-height: 0; }
+  .legend-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; border-radius: 4px; font-size: 12px; }
   .legend-item:hover { background: var(--item-hover); padding-left: 4px; }
   .legend-item.dimmed { opacity: 0.35; }
-  .legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
   .legend-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .legend-count { color: var(--inactive); font-size: 11px; }
-  #stats { padding: 10px 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--inactive); }
+  #stats { padding: 6px 14px; border-top: 1px solid var(--border); font-size: 10px; color: var(--inactive); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #watermark { position: fixed; top: 12px; left: 14px; z-index: 4; font-size: 11px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); opacity: 0.18; pointer-events: none; user-select: none; }
   #legend-controls { display: flex; gap: 6px; margin-bottom: 8px; }
   #legend-controls button { flex: 1; background: var(--bg); border: 1px solid var(--track); color: var(--text-dim); padding: 4px 0; border-radius: 4px; font-size: 11px; cursor: pointer; }
   #legend-controls button:hover { border-color: var(--accent); color: var(--text); }
-  /* Mode toggle */
-  #mode-wrap { display: flex; gap: 1px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--bg); flex-shrink: 0; }
+  /* Panel tabs (Ontologia / Evidência) — appear inside info-panel when a node is selected */
+  #node-panel-tabs { display: flex; gap: 1px; padding: 8px 12px 0; flex-shrink: 0; }
   .mode-btn { flex: 1; background: var(--panel); border: 1px solid var(--border); color: var(--inactive); padding: 6px 0; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; cursor: pointer; border-radius: 4px; transition: all .15s; font-family: inherit; }
-  .mode-btn:disabled { opacity: 0.3; cursor: not-allowed; }
   .mode-btn:first-child { border-radius: 4px 0 0 4px; }
   .mode-btn:last-child  { border-radius: 0 4px 4px 0; }
   .mode-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .mode-btn:hover:not(.active):not(:disabled) { border-color: var(--accent); color: var(--text-dim); }
-  /* Evidence table */
-  .ev-count { font-size: 10px; color: var(--inactive); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 8px; }
-  .ev-wrap { overflow-x: auto; }
-  .ev-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  .ev-table th { font-size: 10px; color: var(--inactive); text-transform: uppercase; letter-spacing: .08em; padding: 3px 6px 6px; border-bottom: 1px solid var(--border); text-align: left; font-weight: 500; white-space: nowrap; }
-  .ev-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .mode-btn:hover:not(.active) { border-color: var(--accent); color: var(--text-dim); }
+  /* D: dense evidence table — anchor/analysis as sub-row within text cell */
+  .ev-count { font-size: 10px; color: var(--inactive); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 6px; }
+  .ev-wrap { padding: 0; }
+  /* 3 visible columns only: Fonte, Tipo, Anotação+sub-rows. Dynamic fields as extra columns. */
+  .ev-table { border-collapse: collapse; font-size: 11px; table-layout: auto; }
+  .ev-table th { font-size: 10px; color: var(--inactive); text-transform: uppercase; letter-spacing: .08em; padding: 4px 8px 5px; border-bottom: 2px solid var(--border); text-align: left; font-weight: 600; white-space: nowrap; position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  .ev-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
   .ev-table tbody tr:hover td { background: var(--item-hover); }
-  .ev-src { color: var(--accent); white-space: nowrap; font-size: 10px; max-width: 70px; overflow: hidden; text-overflow: ellipsis; }
+  .ev-col-src  { min-width: 100px; max-width: 160px; }
+  .ev-col-type { min-width: 110px; white-space: nowrap; }
+  .ev-col-text { min-width: 220px; }
+  .ev-col-dyn  { min-width: 150px; max-width: 220px; }
+  .ev-src { color: var(--accent); white-space: nowrap; font-size: 10px; font-family: monospace; overflow: hidden; text-overflow: ellipsis; display: block; }
   .ev-badge { display: inline-block; background: var(--border); color: var(--text-dim); padding: 1px 5px; border-radius: 3px; font-size: 10px; white-space: nowrap; }
-  .ev-text { color: var(--text-dim); line-height: 1.45; max-width: 130px; }
-  .ev-note { display: block; color: var(--muted); font-style: italic; margin-top: 2px; font-size: 10px; }
+  /* D: text cell and sub-fields shown in full — table scrolls vertically */
+  .ev-text { color: var(--text-dim); line-height: 1.45; font-size: 11px; }
+  .ev-subfields { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+  .ev-sub { font-size: 10px; line-height: 1.4; color: var(--muted); display: flex; gap: 4px; }
+  .ev-sub-lbl { font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--inactive); flex-shrink: 0; font-size: 9px; padding-top: 1px; }
+  .ev-sub-val { }
+  .ev-dyn-val { font-size: 10px; color: var(--text-dim); }
   .ev-empty { color: var(--inactive); font-style: italic; font-size: 12px; }
   .src-label { font-size: 12px; color: var(--muted); font-family: monospace; word-break: break-all; margin-bottom: 10px; }
   .src-stat  { font-size: 11px; color: var(--inactive); margin-bottom: 8px; }
@@ -96,19 +131,26 @@
   #hud button { background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--track); color: var(--text-dim); width: 36px; height: 36px; border-radius: 7px; font-size: 17px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); transition: border-color .15s, color .15s; }
   #hud button:hover { border-color: var(--accent); color: var(--text); }
   #hud button.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
-  /* Degree filter */
-  #degree-wrap { flex-shrink: 0; padding: 12px 14px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-  #degree-header { display: flex; justify-content: space-between; align-items: center; }
-  #degree-header span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
-  #degree-badge { background: var(--border); color: var(--text); font-size: 11px; padding: 1px 7px; border-radius: 10px; }
+  /* Sidebar tab bar (Info / Filtros) */
+  #sidebar-tabs { display: flex; gap: 1px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--bg); flex-shrink: 0; }
+  .sidebar-tab { flex: 1; background: var(--panel); border: 1px solid var(--border); color: var(--inactive); padding: 5px 0; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; cursor: pointer; border-radius: 4px; transition: all .15s; font-family: inherit; }
+  .sidebar-tab:first-child { border-radius: 4px 0 0 4px; }
+  .sidebar-tab:last-child  { border-radius: 0 4px 4px 0; }
+  .sidebar-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .sidebar-tab:hover:not(.active) { border-color: var(--accent); color: var(--text-dim); }
+  /* Filters tab container — hidden by default; fills remaining sidebar space when shown */
+  #filters-tab { display: none; flex: 1 1 0; flex-direction: column; overflow-y: auto; overflow-x: hidden; }
+  #filters-tab.active { display: flex; }
+  /* Degree filter — inside filters tab */
+  #degree-wrap { padding: 8px 14px 10px; display: flex; flex-direction: column; gap: 6px; }
   #degree-slider { width: 100%; accent-color: var(--accent); cursor: pointer; }
-  #degree-slider::-webkit-slider-runnable-track { height: 4px; background: #3a3a5e; border-radius: 2px; }
-  #degree-slider::-moz-range-track { height: 4px; background: #3a3a5e; border-radius: 2px; }
+  #degree-slider::-webkit-slider-runnable-track { height: 4px; background: var(--track); border-radius: 2px; }
+  #degree-slider::-moz-range-track { height: 4px; background: var(--track); border-radius: 2px; }
   #degree-slider::-webkit-slider-thumb { margin-top: -4px; }
-  #degree-slider::-moz-range-progress { background: #4E79A7; height: 4px; border-radius: 2px; }
-  #degree-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: #555; }
-  #degree-row button { background: none; border: none; color: #4E79A7; font-size: 11px; cursor: pointer; padding: 0; }
-  #degree-row button:hover { color: #76b0d0; }
+  #degree-slider::-moz-range-progress { background: var(--accent); height: 4px; border-radius: 2px; }
+  #degree-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); }
+  #degree-row button { background: none; border: none; color: var(--accent); font-size: 11px; cursor: pointer; padding: 0; }
+  #degree-row button:hover { color: var(--accent-h); }
 </style>
 </head>
 <body>
@@ -124,49 +166,68 @@ window.onerror = function(msg, src, line, col, err) {
   return false;
 };
 </script>
-<div id="_loading" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10;color:#4E79A7;font:15px monospace;pointer-events:none">Loading graph...</div>
+<div id="watermark">Synesis · Knowledge Engineering</div>
+<div id="_loading" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10;color:#1A3A5C;font:15px monospace;pointer-events:none">Loading graph...</div>
 <div id="hud">
   <button onclick="zoomIn()" title="Zoom In">+</button>
   <button onclick="zoomOut()" title="Zoom Out">&minus;</button>
   <button onclick="fitView()" title="Fit All" style="font-size:13px;letter-spacing:-.5px">FIT</button>
   <button id="btn-lock" onclick="toggleLock()" title="Lock / unlock node positions" style="font-size:14px">&#128275;</button>
   <button onclick="exportPNG()" title="Export PNG" style="font-size:11px;letter-spacing:-.5px">PNG</button>
-  <button id="btn-theme" onclick="toggleTheme()" title="Toggle dark / light mode" style="font-size:14px">☀</button>
+  <button id="btn-theme" onclick="toggleTheme()" title="Toggle dark / light mode" style="font-size:14px">🌙</button>
 </div>
 <div id="graph"></div>
 <div id="resize-handle"></div>
 <div id="sidebar">
-  <div id="mode-wrap">
-    <button id="btn-onto" class="mode-btn active" onclick="setMode('ONTOLOGY')">Ontologia</button>
-    <button id="btn-evid" class="mode-btn" onclick="setMode('EVIDENCE')">Evidência</button>
-  </div>
   <div id="search-wrap">
     <input id="search" type="text" placeholder="Search nodes..." autocomplete="off">
     <div id="search-results"></div>
   </div>
+  <div id="sidebar-tabs">
+    <button id="stab-info" class="sidebar-tab active" onclick="setSidebarTab('info')">Informações</button>
+    <button id="stab-filters" class="sidebar-tab" onclick="setSidebarTab('filters')">Filtros</button>
+  </div>
   <div id="info-panel">
-    <h3>Node Info</h3>
-    <div id="info-content"><span class="empty">Clique em um nó ou aresta</span></div>
-  </div>
-  <div id="degree-wrap">
-    <div id="degree-header">
-      <span>Min connections</span>
-      <span id="degree-badge">0</span>
+    <div id="node-panel-tabs" style="display:none">
+      <button id="tab-onto" class="mode-btn active" onclick="setPanelTab('ONTOLOGY')">Ontologia</button>
+      <button id="tab-evid" class="mode-btn" onclick="setPanelTab('EVIDENCE')">Evidência</button>
     </div>
-    <input id="degree-slider" type="range" min="0" value="0">
-    <div id="degree-row">
-      <span id="degree-visible"></span>
-      <button onclick="resetDegree()">Reset</button>
+    <div id="info-meta">
+      <div id="info-content"><span class="empty">Clique em um nó ou aresta</span></div>
     </div>
+    <div id="info-table"></div>
   </div>
-  <div id="legend-wrap">
-    <div id="grouping-tabs"></div>
-    <div id="legend-inner">
-      <div id="legend-controls">
-        <button onclick="toggleAllCommunities(false)">Show All</button>
-        <button onclick="toggleAllCommunities(true)">Hide All</button>
+  <div id="filters-tab">
+    <div id="degree-accordion">
+      <div class="accordion-hdr open" id="degree-acc-hdr" onclick="toggleAccordion('degree-acc-hdr','degree-acc-body')">
+        <span>Min vizinhos &nbsp;<span id="degree-badge" style="background:var(--border);color:var(--text);font-size:11px;padding:1px 7px;border-radius:10px">0</span></span>
+        <span class="acc-caret">▾</span>
       </div>
-      <div id="legend"></div>
+      <div class="accordion-body" id="degree-acc-body" style="max-height:100px">
+        <div id="degree-wrap">
+          <input id="degree-slider" type="range" min="0" value="0">
+          <div id="degree-row">
+            <span id="degree-visible"></span>
+            <button onclick="resetDegree()">Reset</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="legend-wrap">
+      <div class="accordion-hdr open" id="legend-acc-hdr" onclick="toggleAccordion('legend-acc-hdr','legend-acc-body')">
+        <span>Legenda</span>
+        <span class="acc-caret">▾</span>
+      </div>
+      <div class="accordion-body" id="legend-acc-body" style="max-height:none;flex:1 1 0;min-height:0;display:flex;flex-direction:column">
+        <div id="grouping-tabs"></div>
+        <div id="legend-inner">
+          <div id="legend-controls">
+            <button onclick="toggleAllCommunities(false)">Show All</button>
+            <button onclick="toggleAllCommunities(true)">Hide All</button>
+          </div>
+          <div id="legend"></div>
+        </div>
+      </div>
     </div>
   </div>
   <div id="stats">{{STATS_TEXT}}</div>
@@ -182,16 +243,18 @@ const RAW_NODES = {{RAW_NODES_JSON}};
 const RAW_EDGES = {{RAW_EDGES_JSON}};
 const ALL_GROUPINGS = {{ALL_GROUPINGS_JSON}};
 let activeGrouping = {{ACTIVE_GROUPING}};
-const EVIDENCE_DATA      = {{EVIDENCE_JSON}};
-const EV_SOURCE_NODES   = {{EV_SOURCE_NODES_JSON}};
-const EV_MENTION_EDGES  = {{EV_MENTION_EDGES_JSON}};
+const EVIDENCE_DATA   = {{EVIDENCE_JSON}};
+const EV_ITEM_FIELDS  = {{EV_ITEM_FIELDS_JSON}};
 
 const RELATION_COLORS = {
-  "ENABLES":      "#59A14F",
-  "INFLUENCES":   "#4E79A7",
-  "CONSTRAINS":   "#F28E2B",
-  "CONTESTED_BY": "#E15759",
-  "RELATES_TO":   "#9C755F",
+  "ENABLES":        "#4A6741",
+  "INFLUENCES":     "#1A3A5C",
+  "CONSTRAINS":     "#C8963A",
+  "CONTESTED_BY":   "#8B4A3C",
+  "RELATES_TO":     "#3D5A7A",
+  "ASSOCIATION":    "#A8905A",
+  "APPLICATION":    "#8B4A3C",
+  "METHODOLOGICAL": "#3D5A7A",
 };
 
 // HTML-escape helper — prevents XSS when injecting graph data into innerHTML
@@ -210,13 +273,7 @@ function _showErr(msg) {
 
 var nodesDS, edgesDS, container, network;
 try {
-  nodesDS = new vis.DataSet(RAW_NODES.map(n => ({
-    id: n.id, label: n.label, color: n.color, size: n.size,
-    font: n.font, title: n.title,
-    _community: n.community, _community_name: n.community_name,
-    _source_file: n.source_file, _file_type: n.file_type, _degree: n.degree,
-    _extra: n.extra || {},
-  })));
+  nodesDS = new vis.DataSet(RAW_NODES.map(n => ({ ...n })));
 } catch(e) { _showErr('DataSet nodes failed: ' + e.message); throw e; }
 
 try {
@@ -230,7 +287,7 @@ try {
     arrows: e.arrows || { to: { enabled: true, scaleFactor: 0.5 } },
     _relations: e.relations || [],
     _total: e.total || 1,
-    _bidir: !!e.bidirectional,
+    _dominant_type: e._dominant_type || '',
   })));
 } catch(e) { _showErr('DataSet edges failed: ' + e.message); throw e; }
 
@@ -256,94 +313,51 @@ network = new vis.Network(container, { nodes: nodesDS, edges: edgesDS }, {
     hideEdgesOnDrag: true,
     navigationButtons: false,
     keyboard: false,
+    zoomSpeed: 0.3,
   },
-  nodes: { shape: 'dot', borderWidth: 1.5, font: { color: '#ffffff', size: 12 } },
+  nodes: { shape: 'dot', borderWidth: 1.5, font: { color: '#1C1C1E', size: 12 } },
   edges: { smooth: { type: 'continuous', roundness: 0.2 }, selectionWidth: 3 },
 });
 } catch(e) { _showErr('vis.Network() failed: ' + e.message); throw e; }
 
-// Register Evidence-mode nodes/edges into DataSets, hidden by default.
-// Doing this upfront avoids re-adding on every mode switch.
-nodesDS.add(EV_SOURCE_NODES.map(n => ({ ...n, hidden: true })));
-const EV_EDGE_ID_OFFSET = 100000; // avoids collisions with chain edge IDs (0-based index)
-edgesDS.add(EV_MENTION_EDGES.map((e, i) => ({ ...e, id: EV_EDGE_ID_OFFSET + i, hidden: true })));
-
-network.once('stabilizationIterationsDone', () => {
-  network.setOptions({ physics: { enabled: false } });
+if (RAW_NODES.length === 0) {
   var ld = document.getElementById('_loading');
   if (ld) ld.remove();
-});
-
-// ── View mode ────────────────────────────────────────────────────────────────
-let currentViewMode = 'ONTOLOGY';
-let currentNodeId = null;
-
-// Node IDs that participate in at least one chain edge (computed once)
-const _evActiveNodes = new Set(
-  edgesDS.get({ filter: e => !!e._ev_chain }).flatMap(e => [e.from, e.to])
-);
-// Disable Evidence mode button if project has no chain evidence
-if (_evActiveNodes.size === 0) {
-  const btnEvid = document.getElementById('btn-evid');
-  btnEvid.disabled = true;
-  btnEvid.title = 'Este projeto não contém relações CHAIN';
+} else {
+  network.once('stabilizationIterationsDone', () => {
+    network.setOptions({ physics: { enabled: false } });
+    var ld = document.getElementById('_loading');
+    if (ld) ld.remove();
+  });
 }
 
-function setMode(mode) {
-  if (mode === 'EVIDENCE' && _evActiveNodes.size === 0) return;
-  currentViewMode = mode;
-  document.getElementById('btn-onto').classList.toggle('active', mode === 'ONTOLOGY');
-  document.getElementById('btn-evid').classList.toggle('active', mode === 'EVIDENCE');
+// ── Panel tab (Ontologia / Evidência) ────────────────────────────────────────
+let currentPanelTab = 'ONTOLOGY';
+let currentNodeId = null;
 
-  if (mode === 'EVIDENCE') {
-    // Hide grouped ontology edges; show individual chain edges
-    edgesDS.update(
-      edgesDS.get({ filter: e => !e._ev_chain }).map(e => ({ id: e.id, hidden: true }))
-    );
-    edgesDS.update(
-      edgesDS.get({ filter: e => !!e._ev_chain }).map(e => ({ id: e.id, hidden: false }))
-    );
-    // Hide concept nodes that have no chain evidence
-    nodesDS.update(
-      nodesDS.get({ filter: n => !_evActiveNodes.has(n.id) }).map(n => ({ id: n.id, hidden: true }))
-    );
+function setPanelTab(tab) {
+  currentPanelTab = tab;
+  document.getElementById('tab-onto').classList.toggle('active', tab === 'ONTOLOGY');
+  document.getElementById('tab-evid').classList.toggle('active', tab === 'EVIDENCE');
+  if (currentNodeId !== null) _renderNodePanel(currentNodeId);
+}
+
+function _renderNodePanel(nodeId) {
+  document.getElementById('node-panel-tabs').style.display = '';
+  if (currentPanelTab === 'ONTOLOGY') {
+    _showOntologyPanel(nodeId);
   } else {
-    // Restore all concept nodes; swap edges back
-    nodesDS.update(
-      nodesDS.get({ filter: n => !!n.hidden }).map(n => ({ id: n.id, hidden: false }))
-    );
-    edgesDS.update(
-      edgesDS.get({ filter: e => !!e._ev_chain }).map(e => ({ id: e.id, hidden: true }))
-    );
-    edgesDS.update(
-      edgesDS.get({ filter: e => !e._ev_chain }).map(e => ({ id: e.id, hidden: false }))
-    );
-  }
-
-  // Refresh sidebar for currently selected node
-  if (currentNodeId !== null) {
-    const n = nodesDS.get(currentNodeId);
-    if (!n || n.hidden) {
-      document.getElementById('info-content').innerHTML = '<span class="empty">Clique em um nó ou aresta</span>';
-      currentNodeId = null;
-    } else if (mode === 'EVIDENCE') {
-      showEvidenceTable(currentNodeId);
-    } else {
-      showInfo(currentNodeId);
-    }
+    _showEvidencePanel(nodeId);
   }
 }
 
 function _setActiveNode(nodeId) {
   currentNodeId = nodeId;
-  if (currentViewMode === 'EVIDENCE') {
-    showEvidenceTable(nodeId);
-  } else {
-    showInfo(nodeId);
-  }
+  _renderNodePanel(nodeId);
 }
 
-function showInfo(nodeId) {
+
+function _showOntologyPanel(nodeId) {
   const n = nodesDS.get(nodeId);
   if (!n) return;
   const neighborIds = network.getConnectedNodes(nodeId);
@@ -354,88 +368,164 @@ function showInfo(nodeId) {
   }).join('');
   const groupTitle = ALL_GROUPINGS[activeGrouping] ? ALL_GROUPINGS[activeGrouping].title : 'Group';
   const groupVal   = (n._extra && n._extra[activeGrouping]) || n._community_name || '-';
-  let extraFields = '';
+
+  let descHtml = '';
+  let shortFields = [];
   if (n._extra) {
     Object.entries(n._extra).forEach(([k, v]) => {
-      if (k === activeGrouping) return; // already shown as groupTitle above
-      if (v !== null && v !== undefined && v !== '') {
-        extraFields += `<div class="field"><b>${esc(k)}</b><span class="field-val">${esc(String(v))}</span></div>`;
+      if (k === activeGrouping) return;
+      if (v === null || v === undefined || v === '') return;
+      const sv = String(v);
+      if (sv.length > 80) {
+        const uid = 'desc_' + k + '_' + nodeId;
+        descHtml += `<div class="field-desc">
+          <b>${esc(k)}</b>
+          <div class="desc-text" id="${uid}">${esc(sv)}</div>
+          <button class="desc-toggle" onclick="toggleDesc('${uid}',this)">ver mais</button>
+        </div>`;
+      } else {
+        shortFields.push([k, sv]);
       }
     });
   }
+
+  let shortHtml = '';
+  if (shortFields.length) {
+    const cells = shortFields.map(([k,v]) =>
+      `<div class="field"><b>${esc(k)}</b><span class="field-val">${esc(v)}</span></div>`
+    ).join('');
+    shortHtml = `<div class="field-grid">${cells}</div>`;
+  }
+
   document.getElementById('info-content').innerHTML = `
-    <div class="field field-inline" style="margin-bottom:12px"><b style="font-size:14px;opacity:1;text-transform:none;letter-spacing:0;display:inline">${esc(n.label)}</b></div>
-    <div class="field"><b>${esc(groupTitle)}</b><span class="field-val">${esc(groupVal)}</span></div>
-    <div class="field"><b>Degree</b><span class="field-val">${n._degree || 0}</span></div>
-    ${extraFields}
-    ${neighborIds.length ? `<div class="field" style="margin-top:10px"><b>Neighbors</b><span class="field-val">${neighborIds.length}</span></div><div id="neighbors-list">${neighborItems}</div>` : ''}
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+      <b style="font-size:14px">${esc(n.label)}</b>
+      <span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">${esc(groupTitle)}: ${esc(groupVal)}</span>
+      <span style="font-size:10px;color:var(--inactive);margin-left:auto">grau ${n._degree || 0}</span>
+    </div>
+    ${shortHtml}
+    ${descHtml}
+    ${neighborIds.length ? `<div class="field" style="margin-top:6px"><b>Vizinhos (${neighborIds.length})</b></div><div id="neighbors-list">${neighborItems}</div>` : ''}
   `;
+  _setInfoTable('');
 }
 
-function showEvidenceTable(nodeId) {
+function toggleDesc(id, btn) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const expanded = el.classList.toggle('expanded');
+  btn.textContent = expanded ? 'ver menos' : 'ver mais';
+}
+
+function _evBuildTable(records, colSpanEmpty, { showConcept = false } = {}) {
+  // anchor/analysis as sub-rows inside text cell; EV_ITEM_FIELDS as extra columns.
+  const extraCols = EV_ITEM_FIELDS.filter(k => records.some(r => r[k]));
+  const hasConcept = showConcept && records.some(r => r._concept);
+  const totalCols = 3 + extraCols.length + (hasConcept ? 1 : 0);
+  const conceptHeader = hasConcept ? `<th class="ev-col-src">Conceito</th>` : '';
+  const headerCells = `<th class="ev-col-src">Fonte</th><th class="ev-col-type">Tipo</th>${conceptHeader}<th class="ev-col-text">Anotação</th>`
+    + extraCols.map(k => `<th class="ev-col-dyn">${esc(k)}</th>`).join('');
+  const rows = records.map(e => {
+    const badgeColor = RELATION_COLORS[e.type] || '#9C755F';
+    const subParts = [];
+    if (e.note)     subParts.push(`<span class="ev-sub"><span class="ev-sub-lbl">nota</span><span class="ev-sub-val">${esc(e.note)}</span></span>`);
+    if (e.anchor)   subParts.push(`<span class="ev-sub"><span class="ev-sub-lbl">âncora</span><span class="ev-sub-val">${esc(e.anchor)}</span></span>`);
+    if (e.analysis) subParts.push(`<span class="ev-sub"><span class="ev-sub-lbl">análise</span><span class="ev-sub-val">${esc(e.analysis)}</span></span>`);
+    const subHtml = subParts.length ? `<div class="ev-subfields">${subParts.join('')}</div>` : '';
+    const extraCells = extraCols.map(k =>
+      `<td class="ev-col-dyn"><span class="ev-dyn-val">${e[k] ? esc(e[k]) : ''}</span></td>`
+    ).join('');
+    const conceptCell = hasConcept
+      ? `<td class="ev-col-src"><span class="ev-src" style="color:var(--text-dim)">${esc(e._concept || '')}</span></td>`
+      : '';
+    // src = bibtex key; _src_tooltip = human-readable name
+    const srcTooltip = e._src_tooltip || e.src;
+    return `<tr>
+      <td class="ev-col-src"><span class="ev-src" title="${esc(srcTooltip)}">${esc(e.src)}</span></td>
+      <td class="ev-col-type"><span class="ev-badge" style="border-left:2px solid ${esc(badgeColor)}">${esc(e.type||'—')}</span></td>
+      ${conceptCell}
+      <td class="ev-col-text"><span class="ev-text">${esc(e.text)}</span>${subHtml}</td>
+      ${extraCells}
+    </tr>`;
+  }).join('') || `<tr><td colspan="${totalCols}" class="ev-text" style="opacity:.5">${colSpanEmpty}</td></tr>`;
+  return { headerCells, rows, totalCols };
+}
+
+function _setInfoTable(html) {
+  document.getElementById('info-table').innerHTML = html;
+}
+
+function _showEvidencePanel(nodeId) {
   const n = nodesDS.get(nodeId);
   if (!n) return;
   const records = EVIDENCE_DATA[nodeId] || [];
-  const title = `<div class="field field-inline" style="margin-bottom:10px"><b style="font-size:14px;opacity:1;text-transform:none;letter-spacing:0;display:inline">${esc(n.label)}</b></div>`;
+  const title = `<div class="field field-inline" style="margin-bottom:6px"><b style="font-size:14px;opacity:1;text-transform:none;letter-spacing:0;display:inline">${esc(n.label)}</b></div>`;
   if (!records.length) {
     document.getElementById('info-content').innerHTML = title +
       '<div class="ev-empty">Nenhuma evidência registada para este conceito.</div>';
+    _setInfoTable('');
     return;
   }
-  const rows = records.map(e => {
-    const badgeColor = RELATION_COLORS[e.type] || '#9C755F';
-    return `<tr>
-      <td class="ev-src" title="${esc(e.src)}">${esc(e.src)}</td>
-      <td><span class="ev-badge" style="border-left:2px solid ${esc(badgeColor)}">${esc(e.type||'—')}</span></td>
-      <td class="ev-text">${esc(e.text)}${e.note ? `<span class="ev-note">${esc(e.note)}</span>` : ''}</td>
-    </tr>`;
-  }).join('');
+  const { headerCells, rows } = _evBuildTable(records, 'Sem texto disponível', { showConcept: true });
   document.getElementById('info-content').innerHTML = title +
-    `<div class="ev-count">${records.length} registo${records.length !== 1 ? 's' : ''} de evidência</div>
-    <div class="ev-wrap">
+    `<div class="ev-count">${records.length} registo${records.length !== 1 ? 's' : ''} de evidência</div>`;
+  _setInfoTable(`<div class="ev-wrap">
       <table class="ev-table">
-        <thead><tr><th>Fonte</th><th>Tipo</th><th>Anotação</th></tr></thead>
+        <thead><tr>${headerCells}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
-    </div>`;
+    </div>`);
 }
 
-function showEdgeInfo(edgeId) {
-  const e = edgesDS.get(edgeId);
+function _showEdgeEvidencePanel(e) {
   if (!e) return;
+  document.getElementById('node-panel-tabs').style.display = 'none';
   const fromNode  = nodesDS.get(e.from);
   const toNode    = nodesDS.get(e.to);
   const fromLabel = fromNode ? fromNode.label : e.from;
   const toLabel   = toNode   ? toNode.label   : e.to;
-  const fromColor = fromNode ? fromNode.color.background : 'var(--track)';
-  const toColor   = toNode   ? toNode.color.background   : 'var(--track)';
+  const fromColor = fromNode ? fromNode.color.background : '#555';
+  const toColor   = toNode   ? toNode.color.background   : '#555';
 
-  const relations = (e._relations && e._relations.length > 0) ? e._relations : [];
-  const relRows = relations.map(r => {
+  // Collect evidence records for BOTH endpoints filtered by sources that participate
+  // in this specific edge. Falls back to all evidence for both nodes if no src match.
+  const edgeSrcs = new Set((e._relations || []).map(() => '').concat(
+    edgesDS.get({ filter: ed => ed.from === e.from && ed.to === e.to })
+      .flatMap(() => [])
+  ));
+  const seen = new Set();
+  const records = [];
+  [e.from, e.to].forEach(nid => {
+    (EVIDENCE_DATA[nid] || []).forEach(r => {
+      const key = (r._src_ref || r.src) + '|' + (r.type || '') + '|' + (r.text || '');
+      if (!seen.has(key)) { seen.add(key); records.push({ ...r, _from: nid }); }
+    });
+  });
+
+  const relRows = (e._relations || []).map(r => {
     const c = RELATION_COLORS[r.type] || '#9C755F';
-    const badge = r.count > 1
-      ? `<span style="background:var(--border);padding:1px 6px;border-radius:3px;font-size:10px;color:var(--text-dim);margin-left:5px">${r.count}×</span>`
-      : '';
     return `
       <div style="display:flex;align-items:stretch;margin:4px 0 4px 18px">
         <div style="width:3px;background:${esc(c)};border-radius:2px;flex-shrink:0;margin-right:8px"></div>
-        <div style="font-size:11px;color:var(--text-dim);padding:2px 0;letter-spacing:.04em">${esc(r.type)}${badge}</div>
+        <div style="font-size:11px;color:var(--text-dim);padding:2px 0;letter-spacing:.04em">${esc(r.type)}
+          <span style="background:var(--border);padding:1px 6px;border-radius:3px;font-size:10px;color:var(--text-dim);margin-left:5px">${r.count}×</span>
+        </div>
       </div>`;
   }).join('');
 
-  const bidirBadge = e._bidir
-    ? `<span style="font-size:11px;color:#7B8EC8;background:rgba(78,121,167,0.18);padding:1px 8px;border-radius:10px;letter-spacing:.03em">↔ bidirecional</span>`
-    : '';
-  const countBadge = `<span style="font-size:10px;color:var(--text-dim);background:var(--border);padding:1px 6px;border-radius:3px">${e._total}×</span>`;
+  const { headerCells, rows } = _evBuildTable(records, 'Sem evidência disponível', { showConcept: true });
   document.getElementById('info-content').innerHTML = `
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
-      <span style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em;flex:1">Aresta</span>
-      ${bidirBadge}${countBadge}
-    </div>
+    <div class="field" style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Relações</div>
     <span class="neighbor-link" style="border-left-color:${esc(fromColor)}" onclick="focusNode('${e.from}')">${esc(fromLabel)}</span>
     ${relRows}
     <span class="neighbor-link" style="border-left-color:${esc(toColor)};margin-top:2px" onclick="focusNode('${e.to}')">${esc(toLabel)}</span>
-  `;
+    <div class="ev-count" style="margin-top:8px">${records.length} registo${records.length !== 1 ? 's' : ''} de evidência</div>`;
+  _setInfoTable(`<div class="ev-wrap">
+      <table class="ev-table">
+        <thead><tr>${headerCells}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`);
 }
 
 function focusNode(nodeId) {
@@ -460,50 +550,11 @@ container.addEventListener('click', () => {
     _setActiveNode(hoveredNodeId);
   }
 });
-function showChainEvidence(e) {
-  const fromNode = nodesDS.get(e.from);
-  const toNode   = nodesDS.get(e.to);
-  const fromLabel = fromNode ? fromNode.label : e.from;
-  const toLabel   = toNode   ? toNode.label   : e.to;
-  const fromColor = fromNode ? fromNode.color.background : '#555';
-  const toColor   = toNode   ? toNode.color.background   : '#555';
-  const badgeColor = RELATION_COLORS[e._type] || '#9C755F';
-  // Find text/note from EVIDENCE_DATA where source and type match this edge
-  const records = (EVIDENCE_DATA[e.from] || [])
-    .filter(r => r.src === e._src && r.type === e._type);
-  const rowsHtml = records.length
-    ? records.map(r => `<tr>
-        <td class="ev-src" title="${esc(r.src)}">${esc(r.src)}</td>
-        <td><span class="ev-badge" style="border-left:2px solid ${esc(badgeColor)}">${esc(r.type||'—')}</span></td>
-        <td class="ev-text">${esc(r.text)}${r.note ? `<span class="ev-note">${esc(r.note)}</span>` : ''}</td>
-      </tr>`).join('')
-    : `<tr><td colspan="3" class="ev-text" style="opacity:.5">Sem texto disponível</td></tr>`;
-  document.getElementById('info-content').innerHTML = `
-    <div class="field" style="color:#aaa;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Evidência — ${esc(e._type||'cadeia')}</div>
-    <div class="field">
-      <span class="neighbor-link" style="border-left-color:${esc(fromColor)};display:inline-block" onclick="focusNode('${e.from}')">${esc(fromLabel)}</span>
-    </div>
-    <div class="field" style="color:var(--inactive);font-size:11px;margin:2px 0 2px 8px">&#8595;</div>
-    <div class="field">
-      <span class="neighbor-link" style="border-left-color:${esc(toColor)};display:inline-block" onclick="focusNode('${e.to}')">${esc(toLabel)}</span>
-    </div>
-    <div class="ev-wrap" style="margin-top:8px">
-      <table class="ev-table">
-        <thead><tr><th>Fonte</th><th>Tipo</th><th>Anotação</th></tr></thead>
-        <tbody>${rowsHtml}</tbody>
-      </table>
-    </div>`;
-}
-
 network.on('selectEdge', params => {
   if (params.edges.length > 0 && params.nodes.length === 0) {
     currentNodeId = null;
     const e = edgesDS.get(params.edges[0]);
-    if (e && e._ev_chain) {
-      showChainEvidence(e);
-    } else {
-      showEdgeInfo(params.edges[0]);
-    }
+    _showEdgeEvidencePanel(e);
   }
 });
 network.on('click', params => {
@@ -511,7 +562,9 @@ network.on('click', params => {
     _setActiveNode(params.nodes[0]);
   } else if (params.edges.length === 0 && hoveredNodeId === null) {
     currentNodeId = null;
+    document.getElementById('node-panel-tabs').style.display = 'none';
     document.getElementById('info-content').innerHTML = '<span class="empty">Clique em um nó ou aresta</span>';
+    _setInfoTable('');
   }
 });
 
@@ -521,7 +574,8 @@ searchInput.addEventListener('input', () => {
   const q = searchInput.value.toLowerCase().trim();
   searchResults.innerHTML = '';
   if (!q) { searchResults.style.display = 'none'; return; }
-  const matches = RAW_NODES.filter(n => n.label.toLowerCase().includes(q)).slice(0, 20);
+  const pool = nodesDS.get({ filter: n => !n.hidden });
+  const matches = pool.filter(n => n.label.toLowerCase().includes(q)).slice(0, 20);
   if (!matches.length) { searchResults.style.display = 'none'; return; }
   searchResults.style.display = 'block';
   matches.forEach(n => {
@@ -533,7 +587,7 @@ searchInput.addEventListener('input', () => {
     el.onclick = () => {
       network.focus(n.id, { scale: 1.5, animation: true });
       network.selectNodes([n.id]);
-      showInfo(n.id);
+      _setActiveNode(n.id);
       searchResults.style.display = 'none';
       searchInput.value = '';
     };
@@ -548,19 +602,33 @@ document.addEventListener('click', e => {
 // ── Visibility state ────────────────────────────────────────────────────────
 const hiddenCommunities = new Set();
 let minDegree = 0;
-const maxDegree = Math.max(0, ...RAW_NODES.map(n => n.degree || 0));
+// Degree slider operates only on primary (non-filtered) nodes.
+// Filtered nodes (_filtered=True) are secondary placeholders that
+// should not count toward the degree range or the visible-count denominator.
+const PRIMARY_NODES = RAW_NODES.filter(n => !n._filtered);
+// _degree (from Python) counts raw chain occurrences (edges × multiplicity).
+// _neighbor_count counts distinct neighbor nodes from the aggregated edge list —
+// more stable and meaningful for qualitative knowledge graphs.
+const _neighborMap = {};
+RAW_EDGES.forEach(e => {
+  if (!_neighborMap[e.from]) _neighborMap[e.from] = new Set();
+  if (!_neighborMap[e.to])   _neighborMap[e.to]   = new Set();
+  _neighborMap[e.from].add(e.to);
+  _neighborMap[e.to].add(e.from);
+});
+PRIMARY_NODES.forEach(n => { n._neighbor_count = (_neighborMap[n.id] || new Set()).size; });
+const maxDegree = Math.max(0, ...PRIMARY_NODES.map(n => n._neighbor_count || 0));
 
 function isNodeVisible(n) {
-  const dsNode = nodesDS.get(n.id);
-  const community = dsNode ? dsNode._community : n.community;
-  return !hiddenCommunities.has(community) && (n.degree || 0) >= minDegree;
+  if (n._filtered) return true;  // secondary nodes always shown; hidden only by community toggle
+  return !hiddenCommunities.has(n._community) && (n._neighbor_count || 0) >= minDegree;
 }
 
 function refreshVisibility() {
   const updates = RAW_NODES.map(n => ({ id: n.id, hidden: !isNodeVisible(n) }));
   nodesDS.update(updates);
-  const visCount = RAW_NODES.filter(n => isNodeVisible(n)).length;
-  document.getElementById('degree-visible').textContent = visCount + ' / ' + RAW_NODES.length + ' nodes';
+  const visCount = PRIMARY_NODES.filter(n => isNodeVisible(n)).length;
+  document.getElementById('degree-visible').textContent = visCount + ' / ' + PRIMARY_NODES.length + ' nodes';
 }
 
 function toggleAllCommunities(hide) {
@@ -608,19 +676,21 @@ function switchGrouping(field) {
   const g = ALL_GROUPINGS[field];
   const vtc  = g.value_to_color;
   const vtcid = g.value_to_cid;
-  nodesDS.update(nodesDS.getIds().map(id => {
-    const n = nodesDS.get(id);
-    const val = (n._extra && n._extra[field]) || 'Other';
-    const color = vtc[val] || '#888888';
-    const cid   = vtcid.hasOwnProperty(val) ? vtcid[val] : -1;
-    return { id, _community: cid,
-      color: { background: color, border: color, highlight: { background: '#ffffff', border: color } } };
-  }));
+  nodesDS.update(
+    nodesDS.getIds().map(id => {
+      const n = nodesDS.get(id);
+      const val = (n._extra && n._extra[field]) || 'Other';
+      const color = vtc[val] || '#888888';
+      const cid   = vtcid.hasOwnProperty(val) ? vtcid[val] : -1;
+      return { id: n.id, _community: cid,
+        color: { background: color, border: color, highlight: { background: '#ffffff', border: color } } };
+    })
+  );
 
   hiddenCommunities.clear();
   renderLegend(g.legend);
   refreshVisibility();
-  if (currentNodeId) showInfo(currentNodeId);
+  if (currentNodeId) _showOntologyPanel(currentNodeId);
 }
 
 // ── Build grouping tabs ──────────────────────────────────────────────────────
@@ -640,7 +710,12 @@ renderLegend(ALL_GROUPINGS[activeGrouping].legend);
 
 // ── Degree slider ────────────────────────────────────────────────────────────
 const degSlider = document.getElementById('degree-slider');
-degSlider.max = maxDegree;
+// Distribute ticks across [0, maxDegree] in at most 20 steps so the slider
+// doesn't feel too coarse (tiny range) or too fine (hundreds of ticks).
+const _sliderSteps = Math.min(maxDegree, 20);
+const _sliderStep  = _sliderSteps > 0 ? Math.ceil(maxDegree / _sliderSteps) : 1;
+degSlider.max  = maxDegree;
+degSlider.step = _sliderStep;
 degSlider.addEventListener('input', () => {
   minDegree = parseInt(degSlider.value, 10);
   document.getElementById('degree-badge').textContent = minDegree;
@@ -661,6 +736,33 @@ refreshVisibility();
 function zoomIn()  { network.moveTo({ scale: network.getScale() * 1.3, animation: { duration: 200, easingFunction: 'easeInOutQuad' } }); }
 function zoomOut() { network.moveTo({ scale: network.getScale() * 0.77, animation: { duration: 200, easingFunction: 'easeInOutQuad' } }); }
 function fitView() { network.fit({ animation: { duration: 400, easingFunction: 'easeInOutQuad' } }); }
+
+function toggleAccordion(hdrId, bodyId) {
+  const hdr  = document.getElementById(hdrId);
+  const body = document.getElementById(bodyId);
+  if (!hdr || !body) return;
+  const isOpen = hdr.classList.contains('open');
+  if (isOpen) {
+    body.style.maxHeight = body.scrollHeight + 'px'; // set explicit for animation start
+    requestAnimationFrame(() => { body.style.maxHeight = '0'; });
+    hdr.classList.remove('open');
+  } else {
+    body.style.maxHeight = body.scrollHeight + 'px';
+    body.addEventListener('transitionend', function once() {
+      body.style.maxHeight = ''; // allow natural growth after animation
+      body.removeEventListener('transitionend', once);
+    });
+    hdr.classList.add('open');
+  }
+}
+
+function setSidebarTab(tab) {
+  const isInfo = tab === 'info';
+  document.getElementById('info-panel').style.display = isInfo ? '' : 'none';
+  document.getElementById('filters-tab').classList.toggle('active', !isInfo);
+  document.getElementById('stab-info').classList.toggle('active', isInfo);
+  document.getElementById('stab-filters').classList.toggle('active', !isInfo);
+}
 
 let locked = false;
 function toggleLock() {
@@ -700,13 +802,12 @@ function toggleLock() {
   });
 })();
 
-let _isLight = false;
+let _isDark = false;
 function toggleTheme() {
-  _isLight = !_isLight;
-  document.body.classList.toggle('light', _isLight);
-  document.getElementById('btn-theme').textContent = _isLight ? '🌙' : '☀';
-  const labelColor = _isLight ? '#000000' : '#ffffff';
-  // Update all node label colors
+  _isDark = !_isDark;
+  document.body.classList.toggle('dark', _isDark);
+  document.getElementById('btn-theme').textContent = _isDark ? '☀' : '🌙';
+  const labelColor = _isDark ? '#e0e0e0' : '#1C1C1E';
   nodesDS.update(nodesDS.getIds().map(id => ({ id, font: { size: 12, color: labelColor } })));
   network.setOptions({ nodes: { font: { color: labelColor } } });
 }
@@ -717,7 +818,7 @@ function exportPNG() {
   tmp.width  = src.width;
   tmp.height = src.height;
   const ctx = tmp.getContext('2d');
-  ctx.fillStyle = '#0f0f1a';
+  ctx.fillStyle = _isDark ? '#0f0f1a' : '#F7F4EF';
   ctx.fillRect(0, 0, tmp.width, tmp.height);
   ctx.drawImage(src, 0, 0);
   const a = document.createElement('a');

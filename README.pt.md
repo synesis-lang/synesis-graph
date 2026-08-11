@@ -1,6 +1,6 @@
-# Synesis to Neo4j: Pipeline Universal de Grafos
+# synesis-graph: Pipeline Universal de Grafos
 
-[![Synesis](https://img.shields.io/badge/Synesis-Language-blue?style=for-the-badge)](https://synesis-lang.github.io/synesis-docs) ![Python](https://img.shields.io/badge/Python-3.11%2B-yellow?style=for-the-badge) ![Neo4j](https://img.shields.io/badge/Neo4j-Graph_DB-blueviolet?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
+[![Synesis](https://img.shields.io/badge/Synesis-Language-blue?style=for-the-badge)](https://synesis-lang.github.io/synesis-docs) ![Python](https://img.shields.io/badge/Python-3.10%2B-yellow?style=for-the-badge) ![Backends](https://img.shields.io/badge/Backends-Neo4j%20%7C%20HTML-blueviolet?style=for-the-badge) ![License](https://img.shields.io/badge/License-AGPL%20v3%20%2B%20exception-green?style=for-the-badge)
 
 > **Transforme sua pesquisa qualitativa em um Grafo de Conhecimento vivo, navegável e pronto para IA (GraphRAG).**
 
@@ -8,7 +8,9 @@
 
 **Documentação:** [Synesis Language Docs](https://synesis-lang.github.io/synesis-docs)
 
-Este repositório contém o pipeline oficial de ingestão da linguagem **Synesis** para bancos de grafos **Neo4j**. Ele atua como uma ponte entre a análise humana estruturada (arquivos `.syn`) e a inteligência computacional, permitindo que Agentes MCP e algoritmos de Data Science interajam com sua pesquisa.
+Este repositório contém o pipeline oficial da linguagem **Synesis** para representações em grafo. Ele atua como uma ponte entre a análise humana estruturada (arquivos `.syn`) e a inteligência computacional, permitindo que Agentes MCP e algoritmos de Data Science interajam com sua pesquisa.
+
+Dois backends acompanham esta versão — **Neo4j** (property graph, com métricas GDS) e **HTML** (visualização interativa autocontida). Ambos são construídos sobre o mesmo contrato `BackendAdapter`, então o suporte a outros bancos de grafos pode ser acrescentado sem tocar no pipeline.
 
 ---
 
@@ -139,16 +141,25 @@ O cálculo das métricas GDS adapta-se automaticamente ao tipo de template:
 
 ## Instalação
 
-Requer **Python 3.11+**.
+Requer **Python 3.10+** e [synesis](https://github.com/synesis-lang/synesis) ≥ 0.10.0.
 
 ```bash
 # Clone o repositório
-git clone https://github.com/synesis-lang/synesis2neo4j.git
-cd synesis2neo4j
+git clone https://github.com/synesis-lang/synesis-graph.git
+cd synesis-graph
 
-# Instale as dependências
-pip install synesis neo4j rich tomli
+# Instale (editável) com os backends de grafo que precisar
+pip install -e ".[neo4j]"
 ```
+
+### Matriz de compatibilidade
+
+| Pacote | Esta versão | Requer `synesis` | Python |
+|---|---|---|---|
+| synesis | 0.11.0 | — | ≥3.10 |
+| synesis-coder | 0.8.0 | ≥0.10.0 | ≥3.10 |
+| synesis-lsp | 0.22.0 | ≥0.10.0 | ≥3.10 |
+| synesis-graph | 0.5.0 | ≥0.10.0 | ≥3.10 |
 
 ### Plugin GDS (Opcional)
 
@@ -177,16 +188,23 @@ database = "neo4j"             # Opcional, default é 'neo4j'
 
 ## Uso
 
-Execute o script apontando para o arquivo de projeto Synesis (`.synp`):
+Escolha um backend e aponte para o arquivo de projeto Synesis (`.synp`):
 
 ```bash
-python synesis2neo4j.py --project ./meu-projeto/analise.synp
+# Sincroniza com o Neo4j
+synesis-graph neo4j --project ./meu-projeto/analise.synp
+
+# Gera um grafo HTML interativo e autocontido
+synesis-graph html --project ./meu-projeto/analise.synp --output graph.html
+
+# Lista todos os backends e suas opções
+synesis-graph --help
 ```
 
 ### O que acontece durante a execução?
 
-1. **Compilação:** O compilador Synesis valida seu código. Erros de sintaxe são exibidos e o processo para (o banco não é tocado).
-2. **Conexão:** Se a compilação for bem-sucedida, o script conecta ao Neo4j.
+1. **Compilação:** O compilador Synesis valida seu código. Erros de sintaxe são exibidos e o processo para (o destino não é tocado).
+2. **Conexão:** Se a compilação for bem-sucedida, o pipeline conecta ao backend escolhido.
 3. **Constraints:** Regras de unicidade são aplicadas baseadas no Template.
 4. **Sincronização:** Dados são injetados (Conceitos, Citações, Fontes, Relações).
 5. **Métricas Nativas:** Calculadas via Cypher puro.
@@ -350,7 +368,29 @@ graph TD
 
 ## Licença
 
-Distribuído sob a licença MIT. Veja `LICENSE` para mais informações.
+Este programa é distribuído sob a **GNU Affero General Public License, versão 3
+apenas (AGPL-3.0-only), com a Synesis Data-Output Exception** — veja
+[LICENSE](LICENSE) e [LICENSE.exception](LICENSE.exception).
+
+Identificador SPDX: `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception`
+
+**Os grafos que você gera são seus.** Os artefatos exportados — scripts Cypher,
+bases Neo4j e a visualização HTML autocontida — **não** são cobertos pela AGPL
+e não carregam nenhuma obrigação de copyleft em relação ao Synesis.
+
+Isso importa especialmente aqui: o HTML gerado **embute JavaScript e CSS do
+próprio Synesis** para que a visualização funcione de forma autocontida. Esse
+material embutido é *Synesis Runtime Material* nos termos da Exceção e **não**
+coloca o arquivo gerado sob a AGPL. Você pode publicar, vender ou licenciar o
+HTML que gerar sob os termos que quiser.
+
+A AGPL se aplica ao synesis-graph em si: se você modificá-lo e distribuí-lo, ou
+executá-lo como serviço de rede, deve compartilhar suas alterações sob a AGPL.
+
+As versões publicadas antes desta mudança permanecem disponíveis sob a licença
+MIT sob a qual foram lançadas.
+
+Esta licença não concede direitos sobre o nome ou logotipo "Synesis".
 
 ---
 

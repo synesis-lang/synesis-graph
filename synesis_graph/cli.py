@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import io
+import logging
 import sys
 from pathlib import Path
 
 import click
 
+# Force UTF-8 on Windows terminals before Rich or Click emit any output.
+if hasattr(sys.stdout, "buffer") and getattr(sys.stdout, "encoding", "").lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "buffer") and getattr(sys.stderr, "encoding", "").lower() != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 from synesis_graph import (
-    BACKEND_GRAPHQLITE,
     BACKEND_HTML,
     BACKEND_NEO4J,
     __version__,
@@ -27,6 +34,20 @@ def _c(text: str, **kwargs) -> str:
     return click.style(text, **kwargs) if _tty() else text
 
 
+def _configure_logging(verbose: int, quiet: int) -> None:
+    """Set log level on the synesis2graph logger: -q → WARNING/ERROR, default → INFO, -v → DEBUG."""
+    if quiet >= 2:
+        level = logging.ERROR
+    elif quiet == 1:
+        level = logging.WARNING
+    elif verbose >= 1:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    logging.basicConfig(level=level, format="[%(levelname)s] %(message)s")
+    logging.getLogger("synesis2graph").setLevel(level)
+
+
 # ---------------------------------------------------------------------------
 # Main help
 # ---------------------------------------------------------------------------
@@ -43,13 +64,14 @@ def _build_main_help() -> str:
             "Graph Backends",
             [
                 ("neo4j", "Sync project to a Neo4j database (bolt://)"),
-                ("graphqlite", "Sync project to a GraphQLite SQLite file"),
                 ("html", "Render an interactive HTML graph visualization"),
             ],
         ),
     ]
 
     opt_rows = [
+        ("-v, --verbose", "Increase log verbosity (DEBUG). Repeatable."),
+        ("-q, --quiet", "Decrease log verbosity (-q WARNING, -qq ERROR). Repeatable."),
         ("--version", "Show version and exit"),
         ("--help", "Show this message and exit"),
     ]
@@ -63,7 +85,7 @@ def _build_main_help() -> str:
     )
 
     options = (
-        _c("Options:", fg="yellow", bold=True)
+        _c("Global Options:", fg="yellow", bold=True)
         + "\n"
         + "\n".join(f"  {_c(name.ljust(col), fg='cyan')}  {desc_}" for name, desc_ in opt_rows)
     )
@@ -89,6 +111,11 @@ def _build_main_help() -> str:
 
 
 class _SynesisCommand(click.Command):
+    def parse_args(self, ctx, args):
+        if args == ["help"]:
+            args = ["--help"]
+        return super().parse_args(ctx, args)
+
     def format_epilog(self, ctx, formatter):
         if self.epilog:
             formatter.write("\n")
@@ -133,7 +160,7 @@ def _ex(*lines: str) -> str:
                     result.append(_c(tok, fg="green", bold=True))
                 elif re.match(r"^--[\w-]+=?", tok):
                     result.append(_c(tok, fg="cyan"))
-                elif tok in ("neo4j", "graphqlite", "html"):
+                elif tok in ("neo4j", "html"):
                     result.append(_c(tok, fg="green"))
                 else:
                     result.append(tok)
@@ -153,17 +180,14 @@ _EPILOG_NEO4J = _ex(
     "",
     "  # Target a specific named database:",
     "  synesis-graph neo4j --project project.synp --database my_corpus",
-)
-
-_EPILOG_GRAPHQLITE = _ex(
-    "  # Sync to a local SQLite file (default: ./graphs/{project}.db):",
-    "  synesis-graph graphqlite --project project.synp",
     "",
-    "  # Custom output path:",
-    "  synesis-graph graphqlite --project project.synp --config custom.toml",
+    "  # Link several projects: fields declared with IDENTIFIES/REFERS TO are",
+    "  # reified into shared identity nodes (e.g. (:Researcher {entity_id})).",
+    "  synesis-graph neo4j --project lattes.synp --project abstracts.synp",
     "",
-    "  # Load from pre-compiled JSON:",
-    "  synesis-graph graphqlite --json export.json",
+    "  # Name the unified database for a linked graph with --database. Without",
+    "  # it, the name is derived from the members (e.g. 'lattes_abstracts').",
+    "  synesis-graph neo4j --project lattes.synp --project abstracts.synp --database Quinto_Andar",
 )
 
 _EPILOG_HTML = _ex(
@@ -200,8 +224,13 @@ def _source_options(fn):
     fn = click.option(
         "--project",
         default=None,
+        multiple=True,
         type=click.Path(path_type=Path),
-        help="Path to a Synesis project file (.synp).",
+        help=(
+            "Path to a Synesis project file (.synp). Repeat to link several "
+            "projects: identities declared with IDENTIFIES/REFERS TO are "
+            "reified into shared nodes across them."
+        ),
     )(fn)
     return fn
 
@@ -223,9 +252,24 @@ def _config_option(fn):
 
 @click.group(cls=_SynesisGroup, invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="synesis-graph")
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    default=0,
+    help="Increase log verbosity (-v for DEBUG). Repeatable.",
+)
+@click.option(
+    "-q",
+    "--quiet",
+    count=True,
+    default=0,
+    help="Decrease log verbosity (-q WARNING, -qq ERROR). Repeatable.",
+)
 @click.pass_context
-def main(ctx) -> None:
+def main(ctx, verbose: int, quiet: int) -> None:
     """Universal pipeline from Synesis projects to graph databases."""
+    _configure_logging(verbose, quiet)
     if ctx.invoked_subcommand is None:
         out = _build_main_help()
         if hasattr(sys.stdout, "buffer"):
@@ -243,48 +287,28 @@ def main(ctx) -> None:
 @main.command(cls=_SynesisCommand, epilog=_EPILOG_NEO4J)
 @_source_options
 @_config_option
-@click.option("--database", default=None, help="Neo4j database name (overrides config).")
+@click.option(
+    "--database",
+    default=None,
+    help="Neo4j database name. Also names the unified graph when linking several "
+         "--project files (otherwise the name is derived from the members).",
+)
 def neo4j(project, json_input, config, database):
     """Sync a Synesis project to a Neo4j database."""
     _validate_source(project, json_input)
-    from synesis2graph import TaskReporter, run_pipeline
+    from synesis_graph.pipeline import run_pipeline
+    from synesis_graph.ui import TaskReporter
 
     reporter = TaskReporter("Synesis → Neo4j")
-    html_options = None
-    if database:
-        # pass database override via html_options workaround not needed — TaskReporter handles it
-        pass
+    head, extras = _split_projects(project)
     result = run_pipeline(
-        project_path=Path(project).resolve() if project else None,
+        project_path=head,
         json_path=Path(json_input).resolve() if json_input else None,
         config_path=Path(config).resolve(),
         reporter=reporter,
         backend=BACKEND_NEO4J,
-        html_options=html_options,
-    )
-    _report_result(reporter, result)
-
-
-# ---------------------------------------------------------------------------
-# graphqlite subcommand
-# ---------------------------------------------------------------------------
-
-
-@main.command(cls=_SynesisCommand, epilog=_EPILOG_GRAPHQLITE)
-@_source_options
-@_config_option
-def graphqlite(project, json_input, config):
-    """Sync a Synesis project to a GraphQLite SQLite file."""
-    _validate_source(project, json_input)
-    from synesis2graph import TaskReporter, run_pipeline
-
-    reporter = TaskReporter("Synesis → GraphQLite")
-    result = run_pipeline(
-        project_path=Path(project).resolve() if project else None,
-        json_path=Path(json_input).resolve() if json_input else None,
-        config_path=Path(config).resolve(),
-        reporter=reporter,
-        backend=BACKEND_GRAPHQLITE,
+        database=database or None,
+        extra_projects=extras,
     )
     _report_result(reporter, result)
 
@@ -372,7 +396,8 @@ def html(
 ):
     """Render an interactive HTML graph visualization from a Synesis project."""
     _validate_source(project, json_input)
-    from synesis2graph import TaskReporter, run_pipeline
+    from synesis_graph.pipeline import run_pipeline
+    from synesis_graph.ui import TaskReporter
 
     reporter = TaskReporter("Synesis → HTML")
 
@@ -397,8 +422,18 @@ def html(
         if include_isolated:
             html_options["include_isolated"] = True
 
+    head, extras = _split_projects(project)
+    if extras:
+        # The HTML view is a CONCEPT graph (ontology layer). Rendering reified
+        # identity nodes there needs its own layer design — not yet decided —
+        # so refuse rather than silently merge without reifying.
+        raise click.UsageError(
+            "The html backend does not support linking multiple projects yet. "
+            "Use a single --project, or use the neo4j backend to reify identities."
+        )
+
     result = run_pipeline(
-        project_path=Path(project).resolve() if project else None,
+        project_path=head,
         json_path=Path(json_input).resolve() if json_input else None,
         config_path=Path(config).resolve(),
         reporter=reporter,
@@ -418,11 +453,42 @@ def _validate_source(project, json_input) -> None:
         raise click.UsageError("Provide either --project or --json.")
     if project and json_input:
         raise click.UsageError("--project and --json are mutually exclusive.")
+    if json_input and len(_as_tuple(project)) > 1:
+        raise click.UsageError("--json accepts a single source; use --project to link many.")
+
+
+def _as_tuple(project) -> tuple:
+    """Normalizes --project into a tuple (it is `multiple=True`, but may be None)."""
+    if not project:
+        return ()
+    if isinstance(project, (list, tuple)):
+        return tuple(project)
+    return (project,)
+
+
+def _split_projects(project) -> tuple[Path | None, list[Path]]:
+    """Splits --project into (head, extras) for run_pipeline.
+
+    A single --project keeps the legacy single-project path untouched; two or
+    more trigger the link step.
+    """
+    paths = [Path(p).resolve() for p in _as_tuple(project)]
+    if not paths:
+        return None, []
+    return paths[0], paths[1:]
 
 
 def _report_result(reporter, result) -> None:
+    if not result.success and result.error and reporter.stats["errors"] == 0:
+        # Early-exit errors (validation, config) bypass reporter.error() — surface them here.
+        detail = f" — {result.error.details}" if result.error.details else ""
+        reporter.error(f"{result.error.message}{detail}")
     reporter.print_summary()
     if result.success:
         sys.exit(0)
     else:
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
