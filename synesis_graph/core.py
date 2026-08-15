@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,124 @@ class CodeFieldSpec:
     description: str
 
 
+# Template field types whose values are free text, and therefore worth
+# full-text indexing. TOPIC/ENUMERATED/ORDERED are excluded on purpose: they
+# carry a closed vocabulary (and ORDERED/ENUMERATED are numeric indices mapped
+# to labels), so indexing them as prose pollutes the index with category names.
+FULLTEXT_FIELD_TYPES: frozenset[str] = frozenset({"TEXT", "QUOTATION", "MEMO"})
+
+
+@dataclass
+class SourceFieldSpec:
+    """Specification of a SCOPE SOURCE field from the template.
+
+    Carries the declared type alongside the name so downstream consumers can
+    tell prose (TEXT) from a closed vocabulary (ENUMERATED) — the distinction
+    that decides whether a field belongs in a full-text index.
+    """
+
+    field_name: str
+    field_type: str
+
+    @property
+    def is_text(self) -> bool:
+        """True when the field holds free text worth full-text indexing."""
+        return self.field_type.upper() in FULLTEXT_FIELD_TYPES
+
+
+# Lucene analyzer for the full-text indexes. Neo4j's own default; does no stemming
+# and no accent folding — safe for any language, optimal for none. Overridable per
+# corpus via `fulltext_analyzer` in config.toml (see DEFAULT_FULLTEXT_ANALYZER usage
+# in config.py), because the right value follows the corpus language, not the code.
+DEFAULT_FULLTEXT_ANALYZER = "standard-no-stop-words"
+
+# Default HTTP endpoint of an ArcadeDB server. Port 2480 is the server's own default;
+# unlike Neo4j's BOLT port it serves the Studio UI too, so it is the address a user
+# already has open in the browser.
+DEFAULT_ARCADEDB_URI = "http://localhost:2480"
+
+# Lucene analyzer for ArcadeDB's full-text indexes. ArcadeDB names analyzers by their
+# Lucene class rather than by a short label, and its own default is the standard
+# analyzer — no stemming, no accent folding: safe for any language, optimal for none.
+# Override per corpus in config.toml; a Portuguese corpus gains both under
+# `org.apache.lucene.analysis.br.BrazilianAnalyzer`.
+DEFAULT_ARCADEDB_ANALYZER = "org.apache.lucene.analysis.standard.StandardAnalyzer"
+
+# Short analyzer names (the vocabulary Neo4j uses) mapped to the Lucene classes
+# ArcadeDB expects. Lets one config.toml serve both backends: `fulltext_analyzer =
+# "brazilian"` means the same thing to each. A value already shaped like a class name
+# is passed through untouched, so any analyzer the server has stays reachable.
+ARCADEDB_ANALYZER_ALIASES: dict[str, str] = {
+    "brazilian": "org.apache.lucene.analysis.br.BrazilianAnalyzer",
+    "portuguese": "org.apache.lucene.analysis.pt.PortugueseAnalyzer",
+    "english": "org.apache.lucene.analysis.en.EnglishAnalyzer",
+    "spanish": "org.apache.lucene.analysis.es.SpanishAnalyzer",
+    "french": "org.apache.lucene.analysis.fr.FrenchAnalyzer",
+    "german": "org.apache.lucene.analysis.de.GermanAnalyzer",
+    "italian": "org.apache.lucene.analysis.it.ItalianAnalyzer",
+    "standard": "org.apache.lucene.analysis.standard.StandardAnalyzer",
+    # Neo4j's default has no ArcadeDB equivalent; map it to the closest analyzer so a
+    # config written for Neo4j does not fail against a server that never heard of it.
+    "standard-no-stop-words": "org.apache.lucene.analysis.core.SimpleAnalyzer",
+    "simple": "org.apache.lucene.analysis.core.SimpleAnalyzer",
+    "whitespace": "org.apache.lucene.analysis.core.WhitespaceAnalyzer",
+}
+
+
+def resolve_arcadedb_analyzer(name: str) -> str:
+    """Lucene class for an analyzer name, accepting short labels and class names.
+
+    Keeps `fulltext_analyzer` portable between the Neo4j and ArcadeDB backends: the
+    short names Neo4j understands resolve to the classes ArcadeDB requires, while a
+    fully-qualified class (or any name the alias table does not know) is passed
+    through so the server remains the authority on what exists.
+    """
+    if not name:
+        return DEFAULT_ARCADEDB_ANALYZER
+    return ARCADEDB_ANALYZER_ALIASES.get(name.strip().lower(), name)
+
+
+def humanize_concept_name(name: str) -> str:
+    """Concept name as words, for the full-text index.
+
+    Lucene's tokenizer follows UAX#29, where the underscore is a word character
+    rather than a boundary — so `governança_corporativa` is indexed as ONE token
+    and no natural-language question can ever match it. Measured against face85:
+    "governança corporativa", "governança" and "corporativa" all failed to reach a
+    node that plainly exists. Swapping the analyzer does not help (`brazilian` over
+    the raw name returned 0 hits for every variation); the tokenization has to be
+    fixed in the indexed text itself.
+
+    Synesis guarantees the snake_case — SYNESIS_E015 rejects spaces in a concept,
+    since the parser needs `_` where the chain separator `->` does not reach — so
+    this derivation is mechanical and template-agnostic.
+
+    `name` is untouched: it remains the MERGE key, the uniqueness constraint and
+    the identity every edge resolves against.
+    """
+    return name.replace("_", " ")
+
+
+def source_field_names(source_fields: Sequence[SourceFieldSpec | str]) -> list[str]:
+    """Field names from a SOURCE spec list.
+
+    Tolerates plain strings so payloads built by hand (tests, the synesis2graph
+    shim) keep working after `source_fields` grew from list[str] into specs.
+    """
+    return [f if isinstance(f, str) else f.field_name for f in source_fields]
+
+
+def text_source_field_names(source_fields: Sequence[SourceFieldSpec | str]) -> list[str]:
+    """Names of the SOURCE fields holding free text, for full-text indexing.
+
+    A bare string carries no type, so it is assumed to be text — that is the
+    pre-spec behaviour, and over-indexing is the safer failure here.
+    """
+    return [f for f in source_fields if isinstance(f, str)] + [
+        f.field_name for f in source_fields if isinstance(f, SourceFieldSpec) and f.is_text
+    ]
+
+
 @dataclass
 class GraphPayload:
     """Payload prepared for Neo4j synchronization."""
@@ -108,7 +227,9 @@ class GraphPayload:
     graph_fields: list[str]
     chain_fields: list[ChainFieldSpec]
     code_fields: list[CodeFieldSpec]
-    source_fields: list[str]  # Dynamic properties for Source nodes (SCOPE SOURCE)
+    # Dynamic properties for Source nodes (SCOPE SOURCE). Specs carry the declared
+    # type; plain strings are tolerated for hand-built payloads (see source_field_names).
+    source_fields: list[SourceFieldSpec | str]
     value_maps: dict[str, list[dict[str, Any]]]  # Mapping of indices to labels
     concepts: list[dict[str, Any]]
     sources: list[dict[str, Any]]  # Previously "references"
@@ -152,7 +273,7 @@ def analyze_template(
     list[ChainFieldSpec],
     list[CodeFieldSpec],
     dict[str, list[dict]],
-    list[str],
+    list[SourceFieldSpec],
     str,
     str,
 ]:
@@ -161,12 +282,13 @@ def analyze_template(
 
     Returns:
         Tuple (scalar_fields, graph_fields, chain_fields, code_fields, value_maps,
-               source_fields, memo_field_name).
+               source_fields, memo_field_name, quotation_field_name).
         - graph_fields become taxonomy nodes
         - chain_fields define nodes with self-referential relations (triples)
         - code_fields define references to concepts (list of codes)
         - value_maps maps numeric indices to labels (for ORDERED/ENUMERATED)
-        - source_fields become dynamic properties on Source nodes
+        - source_fields become dynamic properties on Source nodes; each carries its
+          declared type so consumers can tell prose from a closed vocabulary
         - memo_field_name is the ITEM-scoped MEMO field name (e.g. "note", "resumo")
     """
     field_specs = template_data.get("field_specs", {})
@@ -176,7 +298,7 @@ def analyze_template(
     chain_fields: list[ChainFieldSpec] = []
     code_fields: list[CodeFieldSpec] = []
     value_maps: dict[str, list[dict]] = {}
-    source_fields: list[str] = []
+    source_fields: list[SourceFieldSpec] = []
     memo_field_name: str = "note"  # default for backwards compatibility
     quotation_field_name: str = "citation"  # default for backwards compatibility
 
@@ -206,7 +328,9 @@ def analyze_template(
                 quotation_field_name = field_name
 
         elif scope == "SOURCE":
-            source_fields.append(field_name)
+            source_fields.append(
+                SourceFieldSpec(field_name=field_name, field_type=field_type.upper())
+            )
 
     return (
         scalar_fields,
@@ -394,7 +518,7 @@ def _build_graph_payload(
     chain_fields: list[ChainFieldSpec],
     code_fields: list[CodeFieldSpec],
     value_maps: dict[str, list[dict[str, Any]]],
-    source_fields: list[str],
+    source_fields: Sequence[SourceFieldSpec | str],
     memo_field_name: str = "note",
     quotation_field_name: str = "citation",
 ) -> GraphPayload:
@@ -725,12 +849,15 @@ def _extract_concepts(
         # v3.0: campos aplanados na raiz (sem sub-dict "fields")
         props: dict[str, Any] = {
             "name": name,
+            "search_name": humanize_concept_name(name),
             "description": entry.get("description"),
             "created": int(time.time()),
         }
 
         for sf in scalar_fields:
-            if sf in entry:
+            # A template field must never clobber a structural property: `name` is the
+            # MERGE key and `search_name` is what the full-text index reads.
+            if sf in entry and sf not in ("name", "search_name"):
                 props[sf] = entry[sf]
 
         relations: dict[str, list[str]] = {}
@@ -771,13 +898,41 @@ def _extract_item_extra(data: dict[str, Any], skip: set[str]) -> dict[str, str]:
     return extra
 
 
+def _build_item_row(
+    item_id: str,
+    citation: str,
+    description: str,
+    item_extra: dict[str, str],
+) -> dict[str, str]:
+    """Builds the Item node row: structural properties plus the template's ITEM fields.
+
+    The template fields (zone, confidence, score, ...) used to reach the HTML only,
+    through the parallel `item_fields` map, leaving the Neo4j node with just three
+    properties. That made the preview richer than the graph serving the GraphRAG:
+    a rhetorical filter such as "only evidence from Result sections" was
+    unexpressible in Cypher even though the value existed in the .syn.
+
+    `item_extra` is already flat (`_extract_item_extra` returns dict[str, str] via
+    `_join_field_value`), so no nested map ever reaches the driver — the Neo4j
+    restriction that motivated the original detour does not apply here.
+
+    Structural keys always win: a template free to name a field `citation` must not
+    overwrite the quotation that the Item node is built around.
+    """
+    row = {"item_id": item_id, "citation": citation, "description": description}
+    for key, value in item_extra.items():
+        if key not in row:
+            row[key] = value
+    return row
+
+
 def _extract_corpus_data(
     corpus: list[dict[str, Any]],
     bibliography: dict[str, Any],
     relation_definitions: dict[str, str],
     code_field_names: list[str],
     chain_field_names: list[str],
-    source_fields: list[str],
+    source_fields: Sequence[SourceFieldSpec | str],
     ontology_field_names: list[str],
     memo_field_name: str = "note",
     quotation_field_name: str = "citation",
@@ -883,9 +1038,7 @@ def _extract_corpus_data(
                 note = notes[idx - 1] if idx - 1 < len(notes) else shared_note
                 item_id = f"{corpus_id}_n{idx:04d}"
 
-                items.append(
-                    {"item_id": item_id, "citation": base_text, "description": note}
-                )
+                items.append(_build_item_row(item_id, base_text, note, item_extra))
                 if item_extra:
                     item_fields[item_id] = dict(item_extra)
                 from_source.append({"item_id": item_id, "ref": source_ref})
@@ -952,9 +1105,7 @@ def _extract_corpus_data(
                 item_id = f"{corpus_id}_c{idx:04d}"
                 description = descriptions[idx - 1] if idx <= len(descriptions) else ""
 
-                items.append(
-                    {"item_id": item_id, "citation": base_text, "description": description}
-                )
+                items.append(_build_item_row(item_id, base_text, description, item_extra))
                 if item_extra:
                     item_fields[item_id] = dict(item_extra)
                 from_source.append({"item_id": item_id, "ref": source_ref})
@@ -964,7 +1115,10 @@ def _extract_corpus_data(
 
 
 def _build_source_props(
-    source_ref: str, item: dict[str, Any], bibliography: dict[str, Any], source_fields: list[str]
+    source_ref: str,
+    item: dict[str, Any],
+    bibliography: dict[str, Any],
+    source_fields: Sequence[SourceFieldSpec | str],
 ) -> dict[str, Any]:
     """Builds properties of a Source node (SOURCE...END SOURCE block).
 
@@ -987,7 +1141,7 @@ def _build_source_props(
             props[key] = val
 
     # Dynamic fields from template (SCOPE SOURCE) - agora em bibliography
-    for field_name in source_fields:
+    for field_name in source_field_names(source_fields):
         if field_name in bib_entry and bib_entry[field_name] is not None:
             props[field_name] = bib_entry[field_name]
 

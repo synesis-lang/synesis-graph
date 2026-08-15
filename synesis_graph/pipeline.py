@@ -7,14 +7,17 @@ from pathlib import Path
 from typing import Any
 
 from synesis_graph.backends.base import (
+    ArcadeDBBackendAdapter,
     BackendAdapter,
     Neo4jBackendAdapter,
 )
 from synesis_graph.backends.html import HTMLBackendAdapter
 from synesis_graph.config import (
+    BACKEND_ARCADEDB,
     BACKEND_HTML,
     BACKEND_NEO4J,
     SUPPORTED_BACKENDS,
+    ArcadeDBConfig,
     HTMLConfig,
     Neo4jConfig,
     PipelineConfig,
@@ -64,6 +67,15 @@ def build_backend_adapter(
                 details="Expected HTMLConfig for backend 'html'.",
             )
         return HTMLBackendAdapter(config, config_path=config_path)
+
+    if backend == BACKEND_ARCADEDB:
+        if not isinstance(config, ArcadeDBConfig):
+            return ConnectionError(
+                message="Internal configuration type mismatch",
+                stage="config",
+                details="Expected ArcadeDBConfig for backend 'arcadedb'.",
+            )
+        return ArcadeDBBackendAdapter(config)
 
     return ConnectionError(
         message="Unsupported backend",
@@ -247,7 +259,7 @@ def run_pipeline(
                 if v is not None and hasattr(config, k):
                     setattr(config, k, v)
 
-        if backend == BACKEND_NEO4J and database and isinstance(config, Neo4jConfig):
+        if database and isinstance(config, (Neo4jConfig, ArcadeDBConfig)):
             config.database = database
 
         config_error = validate_backend_config(config, backend)

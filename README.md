@@ -10,7 +10,23 @@
 
 This repository contains the official pipeline from the **Synesis** language to graph representations. It acts as a bridge between structured human analysis (`.syn` files) and computational intelligence, enabling MCP Agents and Data Science algorithms to interact with your research.
 
-Two backends ship today — **Neo4j** (property graph, with GDS metrics) and **HTML** (self-contained interactive visualization). Both are built on the same `BackendAdapter` contract, so support for further graph databases can be added without touching the pipeline.
+Three backends ship today — **Neo4j** and **ArcadeDB** (property graphs) and **HTML** (self-contained interactive visualization). All are built on the same `BackendAdapter` contract, so support for further graph databases can be added without touching the pipeline.
+
+### Choosing a backend
+
+| | Neo4j | ArcadeDB | HTML |
+|---|---|---|---|
+| Protocol | BOLT (`bolt://`, port 7687) | HTTP/JSON (`http://`, port 2480) | — |
+| Python dependency | `neo4j` driver (extra) | none (stdlib only) | none |
+| Server setup | database server | database server | none |
+| Graph algorithms | GDS plugin required | built in (`algo.*`) | — |
+| Full-text search | Lucene index | Lucene index with BM25 | — |
+| License | GPL/commercial | Apache 2.0 | — |
+
+Both database backends produce the **same graph** from the same project: on the
+FACE/UFMG corpus every structural count matches (concepts, items, sources and all
+relationship types). They differ in how the advanced metrics are scoped — see
+[Graph Metrics](#graph-metrics).
 
 ---
 
@@ -115,7 +131,26 @@ Calculated via pure Cypher, without external dependencies.
 | `item_count` | Citations extracted from source | Source data volume |
 | `concept_count` | Distinct concepts mentioned | Source conceptual richness |
 
-### GDS Metrics (Requires Plugin)
+### Advanced Metrics
+
+The same three metrics are produced by both database backends, from different engines:
+
+| Backend | Engine | Requires |
+|---|---|---|
+| Neo4j | Graph Data Science (`gds.*`) | GDS plugin |
+| ArcadeDB | built-in algorithms (`algo.*`) | nothing |
+
+**The scores are not directly comparable between the two.** Neo4j's GDS projects only
+the concept subgraph (concepts and their `RELATES_TO` edges), while ArcadeDB's `algo.*`
+procedures run over the whole graph and accept no scope filter — so `MENTIONS`,
+`GROUPED_BY` and the other edges contribute as well. Concepts cited by many items rank
+higher under ArcadeDB. On the FACE/UFMG corpus the two top-10 PageRank lists overlap by
+6 of 10 entries. Both are valid centralities; they answer slightly different questions.
+
+Values are written only onto concept nodes in both cases. The pipeline prints this
+caveat on every ArcadeDB export.
+
+#### Neo4j (GDS)
 
 When the **Neo4j Graph Data Science** plugin is installed, the pipeline calculates advanced network metrics:
 
@@ -137,6 +172,12 @@ GDS metrics calculation automatically adapts to template type:
 
 > **Note:** If GDS is not installed, the pipeline displays a warning and continues normally with native metrics.
 
+#### ArcadeDB (built-in)
+
+ArcadeDB ships a native algorithm library, so no plugin is involved and there is no
+degraded path: `pagerank`, `betweenness` and `community` are always computed. Graph
+projection strategies do not apply — the algorithms always see the full graph.
+
 ---
 
 ## Installation
@@ -150,6 +191,9 @@ cd synesis-graph
 
 # Install (editable) with the graph backends you need
 pip install -e ".[neo4j]"
+
+# The ArcadeDB and HTML backends need no extra — they use only the standard library
+pip install -e .
 ```
 
 ### Compatibility matrix
@@ -159,7 +203,7 @@ pip install -e ".[neo4j]"
 | synesis | 0.11.0 | — | ≥3.10 |
 | synesis-coder | 0.8.0 | ≥0.10.0 | ≥3.10 |
 | synesis-lsp | 0.22.0 | ≥0.10.0 | ≥3.10 |
-| synesis-graph | 0.5.0 | ≥0.10.0 | ≥3.10 |
+| synesis-graph | 0.6.0 | ≥0.10.0 | ≥3.10 |
 
 ### GDS Plugin (Optional)
 
@@ -174,7 +218,7 @@ For advanced metrics, install the [Neo4j Graph Data Science](https://neo4j.com/d
 
 ## Configuration
 
-Create a `config.toml` file in the root with your Neo4j credentials:
+Create a `config.toml` file in the root with the credentials of the backend you use:
 
 ```toml
 [neo4j]
@@ -182,7 +226,17 @@ uri = "bolt://localhost:7687"  # Or your Neo4j Aura URI
 user = "neo4j"
 password = "your_secret_password"
 database = "neo4j"             # Optional, default is 'neo4j'
+
+[arcadedb]
+uri = "http://localhost:2480"  # HTTP endpoint — NOT a bolt:// URL
+user = "root"
+password = "your_secret_password"
+# database = "my_corpus"       # Optional, derived from the project name
+# fulltext_analyzer = "brazilian"
 ```
+
+Both blocks may coexist; each backend reads only its own. See `config.toml.example`
+for every option.
 
 ---
 
@@ -193,6 +247,9 @@ Pick a backend and point it at the Synesis project file (`.synp`):
 ```bash
 # Sync to Neo4j
 synesis-graph neo4j --project ./my-project/analysis.synp
+
+# Sync to ArcadeDB
+synesis-graph arcadedb --project ./my-project/analysis.synp
 
 # Render a self-contained interactive HTML graph
 synesis-graph html --project ./my-project/analysis.synp --output graph.html
@@ -208,7 +265,7 @@ synesis-graph --help
 3. **Constraints:** Uniqueness rules are applied based on the Template.
 4. **Synchronization:** Data is injected (Concepts, Citations, Sources, Relationships).
 5. **Native Metrics:** Calculated via pure Cypher.
-6. **GDS Metrics:** Calculated if plugin is available (with warning if not).
+6. **Advanced Metrics:** GDS on Neo4j (with a warning if the plugin is absent), built-in `algo.*` on ArcadeDB (always available).
 
 ---
 

@@ -34,7 +34,7 @@ def test_help_lists_all_backends():
     assert "SYNESIS GRAPH" in out
     assert "Usage:" in out
     assert "Commands:" in out
-    for cmd in ("neo4j", "html"):
+    for cmd in ("neo4j", "arcadedb", "html"):
         assert cmd in out
 
 
@@ -43,6 +43,22 @@ def test_subcommand_help_shows_examples():
     assert result.exit_code == 0
     assert "Examples:" in result.output
     assert "--project" in result.output
+
+
+def test_arcadedb_subcommand_help_shows_examples_and_flags():
+    result = _run("arcadedb", "--help")
+    assert result.exit_code == 0
+    out = result.output
+    assert "Examples:" in out
+    for flag in ("--project", "--json", "--config", "--database"):
+        assert flag in out
+
+
+def test_arcadedb_help_warns_the_uri_is_http_not_bolt():
+    """Pointing [arcadedb].uri at the BOLT port is the likely first mistake."""
+    result = _run("arcadedb", "--help")
+    assert "bolt://" in result.output
+    assert "2480" in result.output
 
 
 def test_html_subcommand_help_shows_filter_flags():
@@ -68,7 +84,7 @@ def test_direct_module_version_runs():
 
 def test_help_alias_works_for_subcommands():
     """`synesis-graph COMMAND help` must be equivalent to `--help`."""
-    for cmd in ("neo4j", "html"):
+    for cmd in ("neo4j", "arcadedb", "html"):
         result = _run(cmd, "help")
         assert result.exit_code == 0, f"'{cmd} help' returned exit {result.exit_code}"
         assert "Usage:" in result.output

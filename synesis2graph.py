@@ -33,7 +33,7 @@ __version_info__ = (0, 2, 1)
 
 # Phase 1: backend selection contract (re-exported from config for CLI use)
 from synesis_graph.config import (  # noqa: E402
-    BACKEND_NEO4J, BACKEND_HTML, SUPPORTED_BACKENDS,
+    BACKEND_NEO4J, BACKEND_ARCADEDB, BACKEND_HTML, SUPPORTED_BACKENDS,
 )
 
 # ============================================================================

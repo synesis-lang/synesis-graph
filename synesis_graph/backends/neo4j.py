@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from synesis_graph.core import (
+    DEFAULT_FULLTEXT_ANALYZER,
     GraphPayload,
     SyncError,
     get_taxonomy_labels,
+    text_source_field_names,
 )
 from synesis_graph.linkage import REFERS_TO_RELATION
 from synesis_graph.sanitize import sanitize_cypher_label, validate_cypher_label
@@ -38,7 +40,11 @@ def clear_database(session: Any) -> None:
     session.run("MATCH (n) DETACH DELETE n")
 
 
-def sync_to_neo4j(session: Any, payload: GraphPayload) -> SyncError | None:
+def sync_to_neo4j(
+    session: Any,
+    payload: GraphPayload,
+    fulltext_analyzer: str = DEFAULT_FULLTEXT_ANALYZER,
+) -> SyncError | None:
     """
     Synchronizes payload with Neo4j in a single transaction.
 
@@ -61,6 +67,7 @@ def sync_to_neo4j(session: Any, payload: GraphPayload) -> SyncError | None:
             payload.concept_label,
             list(payload.entities.keys()),
         )
+        _create_search_indexes(session, payload, fulltext_analyzer)
         _execute_sync_transaction(session, payload)
         return None
     except Exception as e:
@@ -99,6 +106,67 @@ def _create_constraints(
             session.run(
                 f"CREATE CONSTRAINT IF NOT EXISTS FOR (e:{label}) REQUIRE e.entity_id IS UNIQUE"
             )
+
+
+def _create_search_indexes(
+    session: Any,
+    payload: GraphPayload,
+    fulltext_analyzer: str = DEFAULT_FULLTEXT_ANALYZER,
+) -> None:
+    """Creates full-text indexes over the template's text-bearing fields.
+
+    Constraints guarantee integrity; these serve retrieval. Without them the only
+    way into the graph is text2cypher with exact string matching, so a question
+    that misses a concept's literal name retrieves nothing.
+
+    Every indexed property is derived from the template — never hardcoded. Concept
+    prose lives in `scalar_fields` (`ontology_description` in one project,
+    `factor_description` in another), and Source prose is whichever SCOPE SOURCE
+    field was declared TEXT. `graph_fields` are deliberately absent: TOPIC /
+    ENUMERATED / ORDERED become taxonomy nodes of their own, and indexing a closed
+    vocabulary as prose only dilutes the index.
+
+    `citation` and `description` on Item are structural names the payload
+    normalises from the template's QUOTATION and MEMO fields, so they hold
+    regardless of what the template calls them.
+    """
+    def _props(alias: str, fields: list[str]) -> str:
+        return ", ".join(f"{alias}.{f}" for f in fields if validate_cypher_label(f))
+
+    def _create(name: str, pattern: str, props: str) -> None:
+        """Drops and recreates one full-text index.
+
+        The DROP is not optional. Neo4j refuses a second index over the same
+        (label, properties) pair — `CREATE ... IF NOT EXISTS` then succeeds
+        silently while leaving the OLD index in place, so a changed analyzer
+        would never take effect and nothing would say so. Recreating is free
+        here: the sync clears the database first anyway.
+        """
+        session.run(f"DROP INDEX {name} IF EXISTS")
+        session.run(
+            f"CREATE FULLTEXT INDEX {name} FOR {pattern} ON EACH [{props}] "
+            f"OPTIONS {{indexConfig: {{`fulltext.analyzer`: $analyzer}}}}",
+            analyzer=fulltext_analyzer,
+        )
+
+    # Concept: the humanised name plus every SCOPE ONTOLOGY text field.
+    # `search_name`, not `name`: the raw snake_case indexes as a single token
+    # (see humanize_concept_name), which no natural-language query can match.
+    # Exact-identifier lookups go through MATCH on `name`, served by the
+    # uniqueness constraint's RANGE index.
+    if validate_cypher_label(payload.concept_label):
+        concept_props = _props("c", ["search_name", *payload.scalar_fields])
+        if concept_props:
+            _create("concept_search", f"(c:{payload.concept_label})", concept_props)
+
+    # Item: the literal excerpt and the analytical memo.
+    _create("item_search", "(i:Item)", "i.citation, i.description")
+
+    # Source: standard bibliographic prose plus the template's TEXT fields.
+    source_text = text_source_field_names(payload.source_fields)
+    source_props = _props("s", ["title", "abstract", *source_text])
+    if source_props:
+        _create("source_search", "(s:Source)", source_props)
 
 
 def _execute_sync_transaction(session: Any, payload: GraphPayload) -> None:

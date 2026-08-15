@@ -16,6 +16,7 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from synesis_graph.config import (  # noqa: E402,F401
+    BACKEND_ARCADEDB,
     BACKEND_HTML,
     BACKEND_NEO4J,
     SUPPORTED_BACKENDS,

@@ -201,6 +201,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
+      contents: write
 
     steps:
     - name: Checkout code
@@ -221,3 +222,27 @@ jobs:
 
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+
+    - name: Extract changelog section
+      # Isola a secao "## [X.Y.Z]" do CHANGELOG.md para o corpo da Release,
+      # sem duplicar o texto manualmente. Testado localmente contra 0.5.0
+      # (ultima secao do arquivo) e 0.3.1 (secao intermediaria) antes de
+      # entrar no workflow. O separador `---` entre secoes e removido porque
+      # o awk o inclui como parte do corte anterior a cada `## [`.
+      run: |
+        VERSION="${GITHUB_REF_NAME#v}"
+        awk "/^## \[$VERSION\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md \
+          | sed '/^---$/d' \
+          | sed -e '/./,$!d' \
+          > release-notes.md
+        if [ ! -s release-notes.md ]; then
+          echo "::error::CHANGELOG.md has no section for version $VERSION — aborting release creation"
+          exit 1
+        fi
+        cat release-notes.md
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+      with:
+        body_path: release-notes.md
+        generate_release_notes: false

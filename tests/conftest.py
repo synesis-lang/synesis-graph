@@ -174,6 +174,25 @@ min_source_count = 3
 max_nodes = 100
 """
 
+TOML_ARCADEDB_VALID = """\
+[arcadedb]
+uri = "http://localhost:2480"
+user = "root"
+password = "test"
+database = "mycorpus"
+"""
+
+TOML_ARCADEDB_MINIMAL = """\
+[arcadedb]
+password = "test"
+"""
+
+TOML_ARCADEDB_MISSING_PASSWORD = """\
+[arcadedb]
+uri = "http://localhost:2480"
+user = "root"
+"""
+
 
 @pytest.fixture
 def toml_neo4j_valid() -> str:
