@@ -16,6 +16,7 @@ if hasattr(sys.stderr, "buffer") and getattr(sys.stderr, "encoding", "").lower()
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from synesis_graph import (
+    BACKEND_ARCADEDB,
     BACKEND_HTML,
     BACKEND_NEO4J,
     __version__,
@@ -47,6 +48,15 @@ def _configure_logging(verbose: int, quiet: int) -> None:
     logging.basicConfig(level=level, format="[%(levelname)s] %(message)s")
     logging.getLogger("synesis2graph").setLevel(level)
 
+    # The Neo4j driver logs raw server notifications ("Neo.ClientNotification.
+    # Schema.IndexOrConstraintDoesNotExist", stack-trace-shaped and addressed to
+    # database engineers). They would inherit the root INFO level and bury the
+    # readable pipeline output this tool is built around. Silence them below
+    # WARNING; `-v` still brings them back for debugging.
+    _driver_level = logging.DEBUG if verbose >= 1 else logging.WARNING
+    for _name in ("neo4j.notifications", "neo4j", "neo4j.io", "neo4j.pool"):
+        logging.getLogger(_name).setLevel(_driver_level)
+
 
 # ---------------------------------------------------------------------------
 # Main help
@@ -64,6 +74,7 @@ def _build_main_help() -> str:
             "Graph Backends",
             [
                 ("neo4j", "Sync project to a Neo4j database (bolt://)"),
+                ("arcadedb", "Sync project to an ArcadeDB database (http://)"),
                 ("html", "Render an interactive HTML graph visualization"),
             ],
         ),
@@ -160,7 +171,7 @@ def _ex(*lines: str) -> str:
                     result.append(_c(tok, fg="green", bold=True))
                 elif re.match(r"^--[\w-]+=?", tok):
                     result.append(_c(tok, fg="cyan"))
-                elif tok in ("neo4j", "html"):
+                elif tok in ("neo4j", "arcadedb", "html"):
                     result.append(_c(tok, fg="green"))
                 else:
                     result.append(tok)
@@ -188,6 +199,27 @@ _EPILOG_NEO4J = _ex(
     "  # Name the unified database for a linked graph with --database. Without",
     "  # it, the name is derived from the members (e.g. 'lattes_abstracts').",
     "  synesis-graph neo4j --project lattes.synp --project abstracts.synp --database Quinto_Andar",
+)
+
+_EPILOG_ARCADEDB = _ex(
+    "  # Sync with default config (config.toml, http://localhost:2480):",
+    "  synesis-graph arcadedb --project project.synp",
+    "",
+    "  # Use a custom config file:",
+    "  synesis-graph arcadedb --project project.synp --config prod.toml",
+    "",
+    "  # Load from pre-compiled JSON (Synesis v3.0 export):",
+    "  synesis-graph arcadedb --json export.json --config prod.toml",
+    "",
+    "  # Target a specific named database:",
+    "  synesis-graph arcadedb --project project.synp --database my_corpus",
+    "",
+    "  # Link several projects, as with the neo4j backend:",
+    "  synesis-graph arcadedb --project lattes.synp --project abstracts.synp --database Quinto_Andar",  # noqa: E501
+    "",
+    "  # Note: [arcadedb].uri is the HTTP endpoint (port 2480, the same one that",
+    "  # serves ArcadeDB Studio) — not a bolt:// URL. No driver and no server",
+    "  # plugin are required.",
 )
 
 _EPILOG_HTML = _ex(
@@ -307,6 +339,40 @@ def neo4j(project, json_input, config, database):
         config_path=Path(config).resolve(),
         reporter=reporter,
         backend=BACKEND_NEO4J,
+        database=database or None,
+        extra_projects=extras,
+    )
+    _report_result(reporter, result)
+
+
+# ---------------------------------------------------------------------------
+# arcadedb subcommand
+# ---------------------------------------------------------------------------
+
+
+@main.command(cls=_SynesisCommand, epilog=_EPILOG_ARCADEDB)
+@_source_options
+@_config_option
+@click.option(
+    "--database",
+    default=None,
+    help="ArcadeDB database name. Also names the unified graph when linking several "
+         "--project files (otherwise the name is derived from the members).",
+)
+def arcadedb(project, json_input, config, database):
+    """Sync a Synesis project to an ArcadeDB database."""
+    _validate_source(project, json_input)
+    from synesis_graph.pipeline import run_pipeline
+    from synesis_graph.ui import TaskReporter
+
+    reporter = TaskReporter("Synesis → ArcadeDB")
+    head, extras = _split_projects(project)
+    result = run_pipeline(
+        project_path=head,
+        json_path=Path(json_input).resolve() if json_input else None,
+        config_path=Path(config).resolve(),
+        reporter=reporter,
+        backend=BACKEND_ARCADEDB,
         database=database or None,
         extra_projects=extras,
     )

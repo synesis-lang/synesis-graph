@@ -11,6 +11,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.6.0] - 2026-08-15
+
+### Added — ArcadeDB backend
+
+- **New backend: `synesis-graph arcadedb`.** ArcadeDB implements OpenCypher natively,
+  so the graph-writing statements are the *same ones* the Neo4j backend uses — they are
+  imported and called, not copied, which keeps one definition of the MERGE semantics.
+  Validated against the FACE/UFMG corpus: every structural count matches the Neo4j
+  export (210 concepts, 20 sources, 174 items, 168 `RELATES_TO`, 348 `MENTIONS`,
+  78 `IS_LINKED_TO`, 99 `MAPPED_TO_ASPECT`), and the top-10 by degree is identical.
+- **No new dependency.** The backend talks HTTP/JSON over `urllib` (standard library),
+  so it adds nothing to install — not even an optional extra. ArcadeDB also speaks the
+  BOLT protocol, which would have allowed reusing the Neo4j driver, but that plugin is
+  not loaded by default and has no persistent configuration file: enabling it means
+  passing a flag on *every* server start. The HTTP API works on a stock installation.
+- Configure it with an `[arcadedb]` block in `config.toml`. Only `password` is
+  required; `uri` defaults to `http://localhost:2480` and `user` to `root`. **The URI is
+  the HTTP endpoint — the one that also serves ArcadeDB Studio — not a `bolt://` URL.**
+- `fulltext_analyzer` is portable between the two backends. Neo4j names analyzers by a
+  short label (`brazilian`), ArcadeDB by the Lucene class
+  (`org.apache.lucene.analysis.br.BrazilianAnalyzer`); short names are expanded
+  automatically and anything else is passed through, so the server stays the authority.
+
+### Changed — `--database` applies to every database backend
+
+- The flag was gated on `backend == neo4j`, so `--database` was silently ignored when
+  another database backend was selected. It now applies to any backend that has a
+  database to name, which is what the help text already promised.
+
+### Added — schema declaration for ArcadeDB
+
+- **Cypher writes properties without declaring them, and ArcadeDB refuses to index an
+  undeclared property**: `Cannot create the index on type 'Chain.search_name' because
+  the property does not exist`. This affects every index, not only the full-text ones.
+- The backend therefore declares the types and the indexed properties before writing.
+  Only *indexed* properties are declared — everything else stays schema-less, so a
+  project remains free to carry any field the template defines without the backend
+  knowing its name.
+- Two further ArcadeDB specifics, both found against a live server: index names come
+  back from introspection as `Item[item_id]`, which is a syntax error in `DROP INDEX`
+  unless backticked; and re-creating an index needs `IF NOT EXISTS`, otherwise a
+  re-export fails with `Index '...' already exists`.
+
+### Added — graph metrics for ArcadeDB, and a corrected persistence path
+
+- `pagerank`, `betweenness` and `community` are computed with ArcadeDB's built-in
+  `algo.*` library. No plugin is involved, so unlike the Neo4j path there is no
+  "GDS not installed" degradation.
+- **Two plausible ways of persisting those results fail silently, and the second is
+  worse than the first.** `CALL algo.pagerank() YIELD node, score SET node.pagerank =
+  score` writes nothing and reports `stats: null` — `YIELD node` is a serialized RID
+  string, not a bindable vertex. The apparent fix,
+  `MATCH (c:Label) WHERE id(c) = id(node)`, *corrupts data*: `id()` of a string is not
+  comparable to `id()` of a vertex, the predicate degenerates, and the MATCH becomes a
+  cartesian product — measured writing concept scores onto `Item` nodes.
+- The RID is now resolved client-side (`@rid` → the concept's unique `name`) and the
+  values are written back with a single `UNWIND`. Rows whose RID is not a concept are
+  dropped there, which is also the scope filter the algorithms do not provide.
+- **Scores are not directly comparable to Neo4j's.** GDS projects only the concept
+  subgraph; `algo.*` runs over the whole graph and accepts no scope filter —
+  `edgeTypes`, `relationship` and friends are accepted and ignored, and `weightProperty`
+  set to zero yields a uniform score rather than isolating a subgraph. On FACE/UFMG the
+  two top-10 PageRank lists overlap by 6 of 10. The pipeline states this on every
+  export.
+
+### Fixed — concept search was unreachable by natural language
+
+- **A full-text index over a snake_case `name` matched nothing a person would
+  type.** Lucene's tokenizer follows UAX#29, where the underscore is a word
+  character rather than a boundary, so `governança_corporativa` was indexed as a
+  single token. Measured against face85: `"governança corporativa"`,
+  `"governança"` and `"corporativa"` all failed to retrieve a node that plainly
+  existed, while the exact string with the underscore worked. The index reported
+  `populationPercent: 100` throughout — it was built correctly and answered
+  nothing.
+- Concepts now carry `search_name`, the same words separated by spaces
+  (`humanize_concept_name`), and `concept_search` indexes that instead of `name`.
+  Synesis guarantees the snake_case — `SYNESIS_E015` rejects spaces in a concept,
+  since the parser needs `_` where the chain separator `->` does not reach — so
+  the derivation is mechanical and template-agnostic.
+- `name` is untouched: it remains the MERGE key, the uniqueness constraint and the
+  identity every edge resolves against. Exact-identifier lookups keep using
+  `MATCH` on `name`, served by the constraint's RANGE index.
+- After the fix, all five phrasings retrieve the node in first place (score 4.74
+  for the full phrase).
+
+### Added — configurable full-text analyzer (`fulltext_analyzer`)
+
+- New optional key in the `[neo4j]` config block. Defaults to Neo4j's own
+  `standard-no-stop-words`, which does no stemming and no accent folding — safe
+  for any language, optimal for none.
+- Setting it to the corpus language measurably improves recall: under `brazilian`,
+  face85 also matches `governanca` (no cedilla) and `governancas` (plural), which
+  the default misses entirely.
+- It belongs in the config rather than the code because the right value follows
+  the corpus: `brazilian` suits face85 and would degrade the English-language
+  factors corpus. Nothing in the template declares a language today.
+- **Indexes are now dropped before being recreated.** Neo4j refuses a second index
+  over the same (label, properties) pair, so `CREATE ... IF NOT EXISTS` succeeded
+  silently while leaving the *old* index in place — a changed analyzer would never
+  have taken effect and nothing would have said so.
+
+### Changed — pipeline output is written for researchers, not DBAs
+
+- The Neo4j driver logged raw server notifications during a normal export, e.g.
+  `Neo.ClientNotification.Schema.IndexOrConstraintDoesNotExist` repeated once per
+  index. Nothing was wrong: the sync wipes the database first, so the subsequent
+  `DROP INDEX ... IF EXISTS` legitimately finds nothing. The notices were
+  addressed to database engineers and buried the readable `[STEP]`/`[OK]` output.
+- Server notifications are now filtered at the source (the driver requests
+  `WARNING` and above), and the `neo4j.*` loggers are capped so nothing slips
+  through a different path. Real problems still surface as warnings.
+- `-v` lifts the filter and restores the full notification stream for debugging.
+
+### Added — full-text indexes derived from the template
+
+- **The graph had no search index at all.** Constraints guaranteed integrity, but
+  nothing served retrieval: the only way in was text2cypher with exact string
+  matching, so a question that missed a concept's literal name retrieved nothing.
+- Added `_create_search_indexes`, run right after the constraints, creating three
+  full-text indexes: `concept_search`, `item_search` and `source_search`.
+- **Every indexed property comes from the template — none is hardcoded.** Concept
+  prose lives in `scalar_fields`, which is `ontology_description` in one project
+  and `factor_description` in another; Source prose is whichever SCOPE SOURCE
+  field was declared `TEXT`. Naming a fixed property would have created the index
+  successfully and indexed nothing.
+- `graph_fields` are deliberately excluded: `TOPIC`/`ENUMERATED`/`ORDERED` become
+  taxonomy nodes of their own, and indexing a closed vocabulary as prose only
+  dilutes the index. `Item` is indexed on `citation`/`description`, the structural
+  names the payload normalises from the template's `QUOTATION` and `MEMO` fields.
+- Validated against face85 with 40 corpus-derived terms (Portuguese and English,
+  from 1 to 80 occurrences): `item_search` and `source_search` both retrieve every
+  node containing the term — 100% recall.
+- Field names are interpolated into the Cypher, so each one is checked with
+  `validate_cypher_label` — the same guard `_create_constraints` already applied
+  to labels.
+
+### Changed — `analyze_template` reports the declared type of each SOURCE field
+
+- `analyze_template` now returns `list[SourceFieldSpec]` instead of `list[str]` in
+  the `source_fields` position, mirroring the existing `ChainFieldSpec` and
+  `CodeFieldSpec`. Each spec carries `field_name` and `field_type`.
+- This is what lets the Source index include prose while leaving a closed
+  vocabulary out: in the FACE/UFMG template, `description` and `method` (`TEXT`)
+  are indexed, `knowledge_area` (`ENUMERATED`) stays a node property but never
+  enters the index.
+- **The returned tuple still has 8 positions** — the type rides inside the spec
+  rather than as a ninth element, so the five call sites that unpack it
+  positionally are unaffected.
+- Added `source_field_names()` and `text_source_field_names()`. Both accept plain
+  strings as well as specs, so hand-built payloads (tests, the `synesis2graph`
+  shim) keep working.
+- Covered by `tests/test_search_indexes.py`.
+
+### Fixed — ITEM template fields now reach the Neo4j node
+
+- **The `Item` node carried only `item_id`, `citation` and `description`.** Every
+  other ITEM field declared in the template (`zone`, `confidence`, `score`, ...)
+  was diverted to the HTML-only `item_fields` map and never reached the graph.
+  The preview was therefore richer than the database serving the GraphRAG: a
+  rhetorical filter such as "only evidence from `Result` sections" was
+  unexpressible in Cypher even though the value existed in the `.syn` and was
+  visible on screen.
+- The detour was justified by Neo4j rejecting nested-map properties, but
+  `_extract_item_extra` already returns `dict[str, str]` — flat scalars. Only the
+  nested key stood in the way, so flattening the fields onto the row is enough;
+  `SET i = row` in `_sync_items` already writes every key it receives.
+- Added `_build_item_row`, used by both the CHAIN and the CODE branch of
+  `_extract_corpus_data`. Structural keys always win: a template free to name a
+  field `citation` cannot overwrite the quotation the node is built around.
+- `item_fields` is unchanged, so the HTML evidence view keeps working as before.
+- Covered by `tests/test_item_fields.py` — the first tests over the payload sent
+  to Neo4j, which had no coverage until now.
+
+**Existing databases need a re-export to pick the fields up**; the sync clears the
+database before writing, so no migration is required.
+
+---
+
 ## [0.5.0] - 2026-08-11
 
 ### Removed — GraphQLite backend

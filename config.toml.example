@@ -6,6 +6,7 @@
 #
 # Usage:
 #   synesis-graph neo4j --project ./project.synp --config config.toml
+#   synesis-graph arcadedb --project ./project.synp --config config.toml
 #   synesis-graph html --project ./project.synp --config config.toml
 #
 # Documentation: https://synesis-lang.github.io/synesis-docs
@@ -18,11 +19,56 @@
 # user: Database username
 # password: Database password
 # database: Target database name (optional, auto-created from project name)
+# fulltext_analyzer: Lucene analyzer for the full-text search indexes (optional)
 
 uri = "bolt://127.0.0.1:7687"
 user = "neo4j"
 password = "CHANGE_ME"
 database = "my_corpus"  # Optional: overrides project-based naming
+
+# Analyzer used by the concept/item/source full-text indexes.
+# Default "standard-no-stop-words" does no stemming and no accent folding — safe
+# for any language, optimal for none. Set it to your corpus language to gain both:
+# a Portuguese corpus indexed with "brazilian" also matches "governanca" (no
+# cedilla) and "governancas" (plural), which the default misses.
+#
+# Common values: brazilian, portuguese, english, spanish, french, german.
+# Run `CALL db.index.fulltext.listAvailableAnalyzers()` for the full list your
+# Neo4j version supports.
+# fulltext_analyzer = "brazilian"
+
+[arcadedb]
+# ArcadeDB connection settings
+#
+# Only `password` is required — everything else has a working default for a local
+# server. The backend talks to ArcadeDB over its HTTP/JSON API, which works on a
+# stock installation and needs no driver and no server plugin.
+#
+# uri: HTTP endpoint of the server (NOT a bolt:// URL). Port 2480 also serves the
+#      ArcadeDB Studio UI, so it is the address you already use in the browser.
+# user: Server user (default "root")
+# password: Server password
+# database: Target database name (optional, derived from the project name)
+# fulltext_analyzer: Lucene analyzer for the full-text indexes (optional)
+
+uri = "http://localhost:2480"
+user = "root"
+password = "CHANGE_ME"
+# database = "my_corpus"  # Optional: overrides project-based naming
+
+# Analyzer used by the concept/item/source full-text indexes.
+# ArcadeDB names analyzers by their Lucene class, but the short names used by the
+# [neo4j] block above are accepted too and expanded automatically — so the same
+# value works for either backend.
+#
+# Short names: brazilian, portuguese, english, spanish, french, german, italian,
+# standard, simple, whitespace. A fully-qualified class is also accepted, e.g.
+# "org.apache.lucene.analysis.br.BrazilianAnalyzer".
+#
+# The default (StandardAnalyzer) does no stemming and no accent folding — safe for
+# any language, optimal for none. A Portuguese corpus gains both under "brazilian":
+# "governanca" (no cedilla) then still matches "governança_corporativa".
+# fulltext_analyzer = "brazilian"
 
 [html]
 # HTML graph output settings (all fields optional — sensible defaults apply)

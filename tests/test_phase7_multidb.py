@@ -96,7 +96,7 @@ def test_run_pipeline_rejects_invalid_backend(s2g, tmp_path):
 def test_neo4j_adapter_connect_failure_returns_connection_error(s2g, monkeypatch):
     class FakeGraphDatabase:
         @staticmethod
-        def driver(uri: str, auth: Any):
+        def driver(uri: str, auth: Any, **_kwargs: Any):
             raise RuntimeError("auth failed")
 
     import synesis_graph.backends.base as _base
@@ -132,7 +132,7 @@ def test_neo4j_adapter_smoke_executes_and_closes_resources(s2g, monkeypatch):
 
     class FakeGraphDatabase:
         @staticmethod
-        def driver(uri: str, auth: Any):
+        def driver(uri: str, auth: Any, **_kwargs: Any):
             return fake_driver
 
     fake_driver = FakeDriver()
@@ -144,7 +144,7 @@ def test_neo4j_adapter_smoke_executes_and_closes_resources(s2g, monkeypatch):
         "ensure_database_exists",
         lambda driver, db_name, reporter, default_database="neo4j": (db_name, None),
     )
-    monkeypatch.setattr(_base, "sync_to_neo4j", lambda session, payload: None)
+    monkeypatch.setattr(_base, "sync_to_neo4j", lambda session, payload, analyzer=None: None)
     monkeypatch.setattr(_base, "compute_metrics", lambda session, payload, reporter: None)
 
     adapter = s2g.Neo4jBackendAdapter(
@@ -180,7 +180,7 @@ def _fake_neo4j(monkeypatch, s2g, captured):
 
     class FakeGraphDatabase:
         @staticmethod
-        def driver(uri: str, auth: Any):
+        def driver(uri: str, auth: Any, **_kwargs: Any):
             return FakeDriver()
 
     import synesis_graph.backends.base as _base
@@ -190,7 +190,7 @@ def _fake_neo4j(monkeypatch, s2g, captured):
         "ensure_database_exists",
         lambda driver, db_name, reporter, default_database="neo4j": (db_name, None),
     )
-    monkeypatch.setattr(_base, "sync_to_neo4j", lambda session, payload: None)
+    monkeypatch.setattr(_base, "sync_to_neo4j", lambda session, payload, analyzer=None: None)
     monkeypatch.setattr(_base, "compute_metrics", lambda session, payload, reporter: None)
 
 

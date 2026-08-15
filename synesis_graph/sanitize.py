@@ -37,6 +37,31 @@ def sanitize_database_name(name: str) -> str:
     return sanitized.lower() or "synesis"
 
 
+def sanitize_arcadedb_database_name(name: str) -> str:
+    """
+    Sanitizes string for use as an ArcadeDB database name.
+
+    ArcadeDB is far more permissive than Neo4j: it accepts underscores, uppercase
+    and accents, so `Quinto_Andar` survives intact instead of degrading to
+    `quinto-andar`. Preserving the project name matters — it is what the researcher
+    sees in Studio.
+
+    Permissiveness is the hazard, though. The server accepts a name containing a
+    space or a slash and turns it into a directory on disk: `create database
+    "com/barra"` leaves a stray `com/` folder under `databases/`, and the name also
+    has to survive being placed in a URL path. Separators and whitespace are
+    therefore replaced with underscores rather than passed through.
+    """
+    sanitized = "".join(
+        c if (c.isalnum() or c in "_-.") else "_" for c in name.strip()
+    )
+    # A leading dot would read as a hidden directory; a leading digit is accepted by
+    # the server but makes an ambiguous identifier.
+    if sanitized and not (sanitized[0].isalpha() or sanitized[0] == "_"):
+        sanitized = "db_" + sanitized
+    return sanitized or "synesis"
+
+
 def validate_cypher_label(label: str) -> bool:
     """Validates if label is safe for direct use in Cypher."""
     return bool(_CYPHER_LABEL_PATTERN.match(label))

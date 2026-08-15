@@ -20,6 +20,7 @@ _PUBLIC_NAMES = [
     "GraphPayload",
     "PipelineResult",
     "BACKEND_NEO4J",
+    "BACKEND_ARCADEDB",
     "BACKEND_HTML",
     "SUPPORTED_BACKENDS",
 ]

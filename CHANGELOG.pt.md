@@ -11,6 +11,200 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ---
 
+## [Não lançado]
+
+---
+
+## [0.6.0] - 2026-08-15
+
+### Adicionado — backend ArcadeDB
+
+- **Novo backend: `synesis-graph arcadedb`.** O ArcadeDB implementa OpenCypher
+  nativamente, então os statements de escrita do grafo são *os mesmos* do backend Neo4j
+  — importados e chamados, não copiados, o que mantém uma única definição da semântica
+  de MERGE. Validado contra o corpus FACE/UFMG: todas as contagens estruturais batem com
+  a exportação para Neo4j (210 conceitos, 20 fontes, 174 itens, 168 `RELATES_TO`, 348
+  `MENTIONS`, 78 `IS_LINKED_TO`, 99 `MAPPED_TO_ASPECT`), e o top-10 por grau é idêntico.
+- **Sem dependência nova.** O backend fala HTTP/JSON via `urllib` (biblioteca padrão),
+  então não acrescenta nada para instalar — nem um extra opcional. O ArcadeDB também
+  fala o protocolo BOLT, o que permitiria reusar o driver do Neo4j, mas esse plugin não
+  é carregado por padrão e não tem arquivo de configuração persistente: habilitá-lo
+  exige passar uma flag em *toda* inicialização do servidor. A API HTTP funciona numa
+  instalação padrão.
+- Configure com um bloco `[arcadedb]` no `config.toml`. Só `password` é obrigatório;
+  `uri` assume `http://localhost:2480` e `user` assume `root`. **A URI é o endpoint
+  HTTP — o mesmo que serve o ArcadeDB Studio — e não uma URL `bolt://`.**
+- `fulltext_analyzer` é portátil entre os dois backends. O Neo4j nomeia analyzers por
+  rótulo curto (`brazilian`), o ArcadeDB pela classe Lucene
+  (`org.apache.lucene.analysis.br.BrazilianAnalyzer`); nomes curtos são expandidos
+  automaticamente e qualquer outro valor passa intacto, então o servidor segue sendo a
+  autoridade.
+
+### Alterado — `--database` vale para todos os backends de banco
+
+- A flag estava condicionada a `backend == neo4j`, então `--database` era ignorado em
+  silêncio quando outro backend de banco era selecionado. Agora vale para qualquer
+  backend que tenha um banco a nomear, que é o que o texto de ajuda já prometia.
+
+### Adicionado — declaração de schema para o ArcadeDB
+
+- **O Cypher grava propriedades sem declará-las, e o ArcadeDB recusa indexar uma
+  propriedade não declarada**: `Cannot create the index on type 'Chain.search_name'
+  because the property does not exist`. Isso afeta todos os índices, não só os
+  full-text.
+- O backend passa então a declarar os tipos e as propriedades indexadas antes de
+  escrever. Só as propriedades *indexadas* são declaradas — o resto segue schema-less,
+  então um projeto continua livre para carregar qualquer campo definido no template sem
+  que o backend conheça o nome dele.
+- Mais duas especificidades do ArcadeDB, ambas encontradas contra um servidor real: os
+  nomes de índice voltam da introspecção como `Item[item_id]`, que é erro de sintaxe em
+  `DROP INDEX` sem crases; e recriar um índice exige `IF NOT EXISTS`, senão uma nova
+  exportação falha com `Index '...' already exists`.
+
+### Adicionado — métricas de grafo no ArcadeDB, e um caminho de persistência corrigido
+
+- `pagerank`, `betweenness` e `community` são calculados com a biblioteca nativa
+  `algo.*` do ArcadeDB. Não há plugin envolvido, então — diferente do caminho Neo4j —
+  não existe a degradação "GDS não instalado".
+- **Duas formas plausíveis de persistir esses resultados falham em silêncio, e a segunda
+  é pior que a primeira.** `CALL algo.pagerank() YIELD node, score SET node.pagerank =
+  score` não grava nada e reporta `stats: null` — `YIELD node` é um RID serializado como
+  string, não um vértice vinculável. A correção aparente,
+  `MATCH (c:Label) WHERE id(c) = id(node)`, *corrompe dados*: `id()` de uma string não é
+  comparável a `id()` de um vértice, o predicado degenera e o MATCH vira produto
+  cartesiano — medido gravando scores de conceito em nós `Item`.
+- O RID passa a ser resolvido no cliente (`@rid` → o `name` único do conceito) e os
+  valores são gravados de volta com um único `UNWIND`. As linhas cujo RID não é conceito
+  são descartadas aí, o que também é o filtro de escopo que os algoritmos não oferecem.
+- **Os scores não são diretamente comparáveis aos do Neo4j.** O GDS projeta apenas o
+  subgrafo de conceitos; o `algo.*` roda sobre o grafo inteiro e não aceita filtro de
+  escopo — `edgeTypes`, `relationship` e afins são aceitos e ignorados, e
+  `weightProperty` em zero produz score uniforme em vez de isolar um subgrafo. No
+  FACE/UFMG os dois top-10 de PageRank coincidem em 6 de 10. O pipeline declara isso a
+  cada exportação.
+
+### Corrigido — busca de conceitos era inalcançável por linguagem natural
+
+- **Um índice full-text sobre `name` em snake_case não casava com nada que uma
+  pessoa digitaria.** O tokenizador do Lucene segue a UAX#29, na qual o underscore
+  é caractere de palavra e não separador, então `governança_corporativa` era
+  indexado como um único token. Medido no face85: `"governança corporativa"`,
+  `"governança"` e `"corporativa"` falhavam em recuperar um nó que existia, ao
+  passo que a string exata com underscore funcionava. O índice reportava
+  `populationPercent: 100` o tempo todo — estava construído corretamente e não
+  respondia nada.
+- Conceitos passam a carregar `search_name`, as mesmas palavras separadas por
+  espaço (`humanize_concept_name`), e o `concept_search` indexa esse campo no lugar
+  de `name`. O Synesis garante o snake_case — o `SYNESIS_E015` rejeita espaços em
+  conceitos, já que o parser precisa do `_` onde o separador de chain `->` não
+  alcança —, portanto a derivação é mecânica e agnóstica ao template.
+- `name` permanece intocado: continua sendo a chave de MERGE, a constraint de
+  unicidade e a identidade contra a qual toda aresta resolve. Buscas pelo
+  identificador exato seguem usando `MATCH` em `name`, servidas pelo índice RANGE
+  da constraint.
+- Após a correção, todas as cinco formulações recuperam o nó em primeiro lugar
+  (score 4.74 para a frase completa).
+
+### Adicionado — analyzer full-text configurável (`fulltext_analyzer`)
+
+- Nova chave opcional no bloco `[neo4j]` do config. O padrão é o próprio
+  `standard-no-stop-words` do Neo4j, que não faz stemming nem folding de acentos —
+  seguro para qualquer idioma, ótimo para nenhum.
+- Defini-lo conforme o idioma do corpus melhora o recall de forma mensurável: sob
+  `brazilian`, o face85 também casa `governanca` (sem cedilha) e `governancas`
+  (plural), que o padrão não encontra.
+- Fica no config, e não no código, porque o valor correto acompanha o corpus:
+  `brazilian` serve ao face85 e degradaria o corpus factors, em inglês. Nada no
+  template declara idioma hoje.
+- **Os índices agora são removidos antes de recriados.** O Neo4j recusa um segundo
+  índice sobre o mesmo par (label, propriedades), de modo que
+  `CREATE ... IF NOT EXISTS` tinha sucesso em silêncio deixando o índice *antigo*
+  no lugar — um analyzer alterado nunca entraria em vigor e nada avisaria.
+
+### Alterado — a saída do pipeline é escrita para pesquisadores, não para DBAs
+
+- O driver Neo4j registrava notificações cruas do servidor durante uma exportação
+  normal, por exemplo `Neo.ClientNotification.Schema.IndexOrConstraintDoesNotExist`
+  repetida uma vez por índice. Nada estava errado: o sync limpa o banco antes, e o
+  `DROP INDEX ... IF EXISTS` seguinte legitimamente não encontra nada. Os avisos
+  eram dirigidos a engenheiros de banco e soterravam a saída legível
+  `[STEP]`/`[OK]`.
+- As notificações do servidor passam a ser filtradas na origem (o driver solicita
+  `WARNING` para cima), e os loggers `neo4j.*` ficam limitados para que nada escape
+  por outro caminho. Problemas reais continuam aparecendo como avisos.
+- O `-v` suspende o filtro e restaura o fluxo completo de notificações para
+  depuração.
+
+### Adicionado — índices full-text derivados do template
+
+- **O grafo não tinha nenhum índice de busca.** As constraints garantiam
+  integridade, mas nada servia à recuperação: a única porta de entrada era
+  text2cypher com casamento exato de string, de modo que uma pergunta que não
+  acertasse o nome literal do conceito não recuperava nada.
+- Adicionado `_create_search_indexes`, executado logo após as constraints,
+  criando três índices full-text: `concept_search`, `item_search` e
+  `source_search`.
+- **Toda propriedade indexada vem do template — nenhuma é hardcoded.** A prosa do
+  conceito está em `scalar_fields`, que é `ontology_description` em um projeto e
+  `factor_description` em outro; a prosa da fonte é o campo SCOPE SOURCE declarado
+  como `TEXT`. Nomear uma propriedade fixa criaria o índice com sucesso e não
+  indexaria nada.
+- `graph_fields` ficam de fora deliberadamente: `TOPIC`/`ENUMERATED`/`ORDERED`
+  viram nós de taxonomia próprios, e indexar vocabulário fechado como prosa apenas
+  dilui o índice. `Item` é indexado por `citation`/`description`, os nomes
+  estruturais que o payload normaliza a partir dos campos `QUOTATION` e `MEMO`.
+- Validado no face85 com 40 termos extraídos do corpus (português e inglês, de 1 a
+  80 ocorrências): `item_search` e `source_search` recuperam todos os nós que
+  contêm o termo — recall de 100%.
+- Os nomes de campo são interpolados no Cypher, então cada um passa por
+  `validate_cypher_label` — a mesma proteção que `_create_constraints` já aplicava
+  aos labels.
+
+### Alterado — `analyze_template` informa o tipo declarado de cada campo SOURCE
+
+- `analyze_template` passa a devolver `list[SourceFieldSpec]` em vez de
+  `list[str]` na posição `source_fields`, espelhando os já existentes
+  `ChainFieldSpec` e `CodeFieldSpec`. Cada spec carrega `field_name` e
+  `field_type`.
+- É isso que permite ao índice de Source incluir prosa e deixar de fora o
+  vocabulário fechado: no template FACE/UFMG, `description` e `method` (`TEXT`)
+  são indexados, enquanto `knowledge_area` (`ENUMERATED`) continua propriedade do
+  nó mas nunca entra no índice.
+- **A tupla devolvida continua com 8 posições** — o tipo viaja dentro do spec, e
+  não como nono elemento, então os cinco call sites que a desempacotam
+  posicionalmente seguem intactos.
+- Adicionados `source_field_names()` e `text_source_field_names()`. Ambos aceitam
+  strings simples além de specs, para que payloads montados à mão (testes, o shim
+  `synesis2graph`) continuem funcionando.
+- Coberto por `tests/test_search_indexes.py`.
+
+### Corrigido — campos ITEM do template agora chegam ao nó Neo4j
+
+- **O nó `Item` carregava apenas `item_id`, `citation` e `description`.** Todos os
+  demais campos ITEM declarados no template (`zone`, `confidence`, `score`, ...)
+  eram desviados para o mapa `item_fields`, exclusivo do HTML, e nunca chegavam
+  ao grafo. A prévia ficava assim mais rica que o banco que alimenta o GraphRAG:
+  um filtro retórico como "apenas evidências de trechos `Result`" era
+  inexprimível em Cypher, embora o valor existisse no `.syn` e estivesse visível
+  na tela.
+- O desvio se justificava pela recusa do Neo4j a propriedades de mapa aninhado,
+  mas `_extract_item_extra` já devolve `dict[str, str]` — escalares achatados.
+  Só a chave aninhada atrapalhava, então achatar os campos na linha basta;
+  o `SET i = row` em `_sync_items` já grava todas as chaves que recebe.
+- Adicionado `_build_item_row`, usado pelos ramos CHAIN e CODE de
+  `_extract_corpus_data`. Chaves estruturais sempre vencem: um template livre
+  para nomear um campo `citation` não pode sobrescrever a citação em torno da
+  qual o nó é construído.
+- `item_fields` permanece inalterado, então a visão de evidências do HTML
+  continua funcionando como antes.
+- Coberto por `tests/test_item_fields.py` — os primeiros testes sobre o payload
+  enviado ao Neo4j, que não tinha cobertura até agora.
+
+**Bancos existentes precisam de re-exportação para receber os campos**; o sync
+limpa o banco antes de escrever, portanto nenhuma migração é necessária.
+
+---
+
 ## [0.5.0] - 2026-08-11
 
 ### Removido — backend GraphQLite

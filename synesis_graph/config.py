@@ -13,12 +13,19 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore
 
-from synesis_graph.core import ConnectionError, SyncError
+from synesis_graph.core import (
+    DEFAULT_ARCADEDB_ANALYZER,
+    DEFAULT_ARCADEDB_URI,
+    DEFAULT_FULLTEXT_ANALYZER,
+    ConnectionError,
+    SyncError,
+)
 from synesis_graph.sanitize import sanitize_database_name
 
 BACKEND_NEO4J = "neo4j"
+BACKEND_ARCADEDB = "arcadedb"
 BACKEND_HTML = "html"
-SUPPORTED_BACKENDS = (BACKEND_NEO4J, BACKEND_HTML)
+SUPPORTED_BACKENDS = (BACKEND_NEO4J, BACKEND_ARCADEDB, BACKEND_HTML)
 
 
 # ============================================================================
@@ -32,6 +39,37 @@ class Neo4jConfig:
     user: str
     password: str
     database: str = "neo4j"
+    # Lucene analyzer for the full-text indexes. A corpus-language analyzer
+    # (`brazilian`, `portuguese`, `english`, ...) adds stemming and accent folding,
+    # measurably improving recall: on face85, `governanca` (no cedilla) and
+    # `governancas` (plural) only reach `governança_corporativa` under `brazilian`.
+    # It lives in the config, not the code, because the right value follows the
+    # corpus: `brazilian` suits face85 and would degrade the English factors corpus.
+    # Not validated here — `CALL db.index.fulltext.listAvailableAnalyzers()` varies
+    # by Neo4j version, so only the server is authoritative.
+    fulltext_analyzer: str = DEFAULT_FULLTEXT_ANALYZER
+
+
+@dataclass
+class ArcadeDBConfig:
+    """ArcadeDB connection configuration.
+
+    `uri` is the HTTP endpoint, not a BOLT one: the backend talks to ArcadeDB over
+    its HTTP/JSON API, which works on a stock installation. (ArcadeDB also speaks
+    BOLT, but that plugin has to be enabled on every server start.)
+    """
+
+    uri: str = DEFAULT_ARCADEDB_URI
+    user: str = "root"
+    password: str = ""
+    database: str = ""
+    # Lucene analyzer for the full-text indexes. Same purpose as Neo4jConfig's field,
+    # different vocabulary: Neo4j takes a short name (`brazilian`), ArcadeDB takes the
+    # Lucene class (`org.apache.lucene.analysis.br.BrazilianAnalyzer`). Short names are
+    # accepted here too and expanded by the sync layer, so a config can be moved between
+    # the two backends unchanged.
+    # Not validated here — the set of available analyzers depends on the server build.
+    fulltext_analyzer: str = DEFAULT_ARCADEDB_ANALYZER
 
 
 @dataclass
@@ -47,7 +85,7 @@ class HTMLConfig:
     include_isolated: bool = True
 
 
-PipelineConfig = Neo4jConfig | HTMLConfig
+PipelineConfig = Neo4jConfig | ArcadeDBConfig | HTMLConfig
 
 
 def _load_neo4j_config(parsed_cfg: dict[str, Any]) -> Neo4jConfig | ConnectionError:
@@ -63,6 +101,9 @@ def _load_neo4j_config(parsed_cfg: dict[str, Any]) -> Neo4jConfig | ConnectionEr
             user=cfg["user"],
             password=cfg["password"],
             database=cfg.get("database", "neo4j"),
+            fulltext_analyzer=str(
+                cfg.get("fulltext_analyzer") or DEFAULT_FULLTEXT_ANALYZER
+            ),
         )
     except KeyError as e:
         return ConnectionError(
@@ -77,6 +118,56 @@ def _load_neo4j_config(parsed_cfg: dict[str, Any]) -> Neo4jConfig | ConnectionEr
             details=str(e),
         )
 
+
+
+def _load_arcadedb_config(parsed_cfg: dict[str, Any]) -> ArcadeDBConfig | ConnectionError:
+    """Loads and validates the [arcadedb] configuration block.
+
+    Only `password` is mandatory. `uri` and `user` have working defaults for a local
+    server (`http://localhost:2480`, `root`), and `database` is normally derived from
+    the project name — the same rule the Neo4j backend follows.
+    """
+    try:
+        cfg = parsed_cfg["arcadedb"]
+    except KeyError:
+        return ConnectionError(
+            message="Incomplete configuration",
+            stage="config",
+            details="Missing [arcadedb] section in the configuration file.",
+        )
+
+    if not isinstance(cfg, dict):
+        return ConnectionError(
+            message="Error reading ArcadeDB configuration",
+            stage="config",
+            details="[arcadedb] must be a table.",
+        )
+
+    # Accept 'URI' as well, matching the Neo4j loader's tolerance.
+    uri = cfg.get("uri") or cfg.get("URI") or DEFAULT_ARCADEDB_URI
+
+    password = cfg.get("password")
+    if password is None:
+        return ConnectionError(
+            message="Incomplete configuration",
+            stage="config",
+            details="Required field missing in [arcadedb]: 'password'",
+        )
+
+    try:
+        return ArcadeDBConfig(
+            uri=str(uri),
+            user=str(cfg.get("user", "root")),
+            password=str(password),
+            database=str(cfg.get("database") or ""),
+            fulltext_analyzer=str(cfg.get("fulltext_analyzer") or DEFAULT_ARCADEDB_ANALYZER),
+        )
+    except Exception as e:
+        return ConnectionError(
+            message="Error reading ArcadeDB configuration",
+            stage="config",
+            details=str(e),
+        )
 
 
 def _load_html_config(parsed_cfg: dict[str, Any]) -> HTMLConfig:
@@ -122,6 +213,9 @@ def load_config(config_path: Path, backend: str) -> PipelineConfig | ConnectionE
     if backend == BACKEND_NEO4J:
         return _load_neo4j_config(parsed_cfg)
 
+    if backend == BACKEND_ARCADEDB:
+        return _load_arcadedb_config(parsed_cfg)
+
     return ConnectionError(
         message="Unsupported backend in configuration loader",
         stage="backend",
@@ -132,6 +226,8 @@ def load_config(config_path: Path, backend: str) -> PipelineConfig | ConnectionE
 def validate_backend_config(config: PipelineConfig, backend: str) -> ConnectionError | None:
     """Validates configuration type against selected backend."""
     if backend == BACKEND_NEO4J and isinstance(config, Neo4jConfig):
+        return None
+    if backend == BACKEND_ARCADEDB and isinstance(config, ArcadeDBConfig):
         return None
     if backend == BACKEND_HTML and isinstance(config, HTMLConfig):
         return None
