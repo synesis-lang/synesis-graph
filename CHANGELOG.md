@@ -15,6 +15,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.0] - 2026-08-17
+
+### Added — vector embeddings for semantic search (ArcadeDB)
+
+- **`--vector-embeddings FIELD,FIELD`** on the `arcadedb` command. Names the
+  ontology fields whose text becomes a vector, generates the vectors locally and
+  indexes them as `LSM_VECTOR` next to the existing full-text index. No API key,
+  no data leaving the machine. Also configurable as
+  `[arcadedb.embeddings].fields`; the flag wins, as `--database` does.
+- **Why it earns its place.** Measured on the FACE/UFMG corpus (210 concepts),
+  with five natural-language questions whose vocabulary is deliberately disjoint
+  from the descriptions: the vector search returns the exact concept in **4 of 5**,
+  BM25 in none. "quem manda nas decisões da empresa" reaches
+  `decisões_estratégicas`, which full-text search cannot find — the two share no
+  word. The goal is not to replace keyword search but to complement it.
+- **Field selection is template-driven, not a fixed list.** Each requested field
+  is checked against the template: an unknown name is an error listing the
+  available ones, a closed vocabulary (ORDERED/ENUMERATED/SCALE) is a warning,
+  and a field holding a single distinct value across the corpus is dropped —
+  it would add identical text to every concept and discriminate nothing.
+  (Measured: `theoretical_significance` is `0` in all 1388 concepts of the
+  Social_Acceptance corpus.)
+- **The model is per project**, in `[arcadedb.embeddings].model`. A Portuguese
+  corpus and an English one have different requirements, and that is a research
+  decision rather than a code one. The default is multilingual for a measured
+  reason: on the question most dependent on Portuguese semantics, the
+  English-only `all-MiniLM-L6-v2` reproduced exactly the lexical error BM25
+  makes.
+- **Vectors are cached** in `<project>.embeddings.json` (git-ignored). Only the
+  concepts whose text changed are recomputed; a fully cached run does not load
+  the model at all. Measured on face85: 11s cold, 1s warm. `--rebuild-embeddings`
+  forces a full recompute.
+- The sidecar records the model, the dimensions and a hash of the field
+  composition. Changing any of them invalidates every vector, because vectors
+  from different models — or different field compositions — are individually
+  valid and mutually meaningless: the distance between them measures the
+  composition, not the meaning, and search degrades with nothing to show for it.
+- Requires the optional extra: `pip install "synesis-graph[embeddings]"`.
+  Absent, the module behaves exactly as before and the flag reports an
+  actionable `DependencyError` rather than an `ImportError`.
+- **Validated end to end on two real corpora**, both embedded and queryable in
+  their ArcadeDB databases: FACE/UFMG (210 concepts, Portuguese, multilingual
+  MiniLM) and Social_Acceptance (1388 concepts, English, `all-mpnet-base-v2`).
+  See the README's "Case studies" section for the measured generation times and
+  live query results.
+
+### Changed
+
+- `GraphPayload` carries the template's `field_specs`. `analyze_template` splits
+  fields by destination and drops the declared type — TOPIC and ORDERED both land
+  in `graph_fields` — so embedding selection had no way to tell a text field from
+  a closed vocabulary. Additive and defaulted; no backend is affected.
+
+---
+
 ## [0.6.0] - 2026-08-15
 
 ### Added — ArcadeDB backend

@@ -40,6 +40,7 @@ from synesis_graph.core import (
     resolve_arcadedb_analyzer,
     text_source_field_names,
 )
+from synesis_graph.embeddings import EmbeddingsSidecar
 from synesis_graph.sanitize import validate_cypher_label
 
 logger = logging.getLogger("synesis2graph")
@@ -70,11 +71,15 @@ def sync_to_arcadedb(
     client: ArcadeDBClient,
     payload: GraphPayload,
     fulltext_analyzer: str = DEFAULT_ARCADEDB_ANALYZER,
+    embeddings: EmbeddingsSidecar | None = None,
 ) -> SyncError | None:
     """Synchronizes the payload with ArcadeDB.
 
     Clears the database first, so the compiler stays the source of truth — the same
     contract as `sync_to_neo4j`.
+
+    `embeddings`, when given, adds the vector property, its index and the vectors
+    themselves. Absent, nothing about the existing behaviour changes.
 
     Returns None on success, SyncError on failure.
     """
@@ -84,6 +89,10 @@ def sync_to_arcadedb(
         _create_constraints(client, payload)
         _create_search_indexes(client, payload, fulltext_analyzer)
         _execute_sync_transaction(client, payload)
+        if embeddings is not None:
+            error = _sync_embeddings(client, payload, embeddings)
+            if error is not None:
+                return error
         return None
     except ArcadeDBError as e:
         return SyncError(message="Synchronization failed", stage="sync", details=str(e))
@@ -114,9 +123,7 @@ def _declare_property(client: ArcadeDBClient, type_name: str, prop: str) -> None
     """Declares one STRING property, if the name is safe to interpolate."""
     if not validate_cypher_label(type_name) or not validate_cypher_label(prop):
         return
-    client.command(
-        f"CREATE PROPERTY {type_name}.{prop} IF NOT EXISTS STRING", language="sql"
-    )
+    client.command(f"CREATE PROPERTY {type_name}.{prop} IF NOT EXISTS STRING", language="sql")
 
 
 def _create_schema(client: ArcadeDBClient, payload: GraphPayload) -> None:
@@ -194,9 +201,7 @@ def _create_constraints(client: ArcadeDBClient, payload: GraphPayload) -> None:
 def _create_unique_index(client: ArcadeDBClient, type_name: str, prop: str) -> None:
     if not validate_cypher_label(type_name) or not validate_cypher_label(prop):
         return
-    client.command(
-        f"CREATE INDEX IF NOT EXISTS ON {type_name} ({prop}) UNIQUE", language="sql"
-    )
+    client.command(f"CREATE INDEX IF NOT EXISTS ON {type_name} ({prop}) UNIQUE", language="sql")
 
 
 def _create_search_indexes(
@@ -261,6 +266,104 @@ def _is_safe_analyzer(analyzer: str) -> bool:
     anything else is refused rather than escaped.
     """
     return bool(analyzer) and all(c.isalnum() or c in "._-" for c in analyzer)
+
+
+# ---------------------------------------------------------------------------
+# Vector embeddings
+# ---------------------------------------------------------------------------
+# The declared type for a vector property. Verified against ArcadeDB 26.7.3:
+# `LIST OF FLOAT`, `FLOAT[]` and `LIST` are all rejected by the SQL parser —
+# only `ARRAY_OF_FLOATS` is accepted. Getting this wrong fails at schema
+# creation, before any data is written.
+VECTOR_PROPERTY_TYPE = "ARRAY_OF_FLOATS"
+
+VECTOR_PROPERTY_NAME = "embedding"
+
+
+def create_vector_schema(
+    client: ArcadeDBClient,
+    concept_label: str,
+    dimensions: int,
+    *,
+    similarity: str = "COSINE",
+    quantization: str = "INT8",
+) -> None:
+    """Declares the embedding property and its LSM_VECTOR index.
+
+    Declaration is mandatory for the same reason it is for the full-text indexes:
+    Cypher writes the property without declaring it, and ArcadeDB refuses to index
+    a property the schema does not know.
+
+    `dimensions` must come from the model that produced the vectors. A mismatch
+    between the index and the data is not rejected at insert time — it surfaces
+    later as wrong neighbours, which is exactly the kind of silent failure this
+    backend has already been bitten by.
+    """
+    if not validate_cypher_label(concept_label) or dimensions <= 0:
+        return
+
+    client.command(
+        f"CREATE PROPERTY {concept_label}.{VECTOR_PROPERTY_NAME} "
+        f"IF NOT EXISTS {VECTOR_PROPERTY_TYPE}",
+        language="sql",
+    )
+
+    if not _is_safe_metadata_word(similarity) or not _is_safe_metadata_word(quantization):
+        logger.warning(
+            "Ignoring unsafe vector index metadata: similarity=%r quantization=%r",
+            similarity,
+            quantization,
+        )
+        return
+
+    client.command(
+        f"CREATE INDEX IF NOT EXISTS ON {concept_label} ({VECTOR_PROPERTY_NAME}) "
+        f"LSM_VECTOR METADATA {{dimensions: {int(dimensions)}, "
+        f"similarity: '{similarity}', quantization: '{quantization}'}}",
+        language="sql",
+    )
+
+
+def _is_safe_metadata_word(value: str) -> bool:
+    """True when a METADATA value is a bare identifier safe to interpolate."""
+    return bool(value) and value.isalnum()
+
+
+def sync_vectors(
+    client: ArcadeDBClient,
+    concept_label: str,
+    vectors: dict[str, list[float]],
+    *,
+    batch_size: int = 500,
+) -> int:
+    """Writes vectors onto existing concept nodes, returning how many landed.
+
+    Matches on `name`, the concept's unique key, rather than on anything derived
+    from a procedure's output. That is deliberate: the metrics module documents
+    how `WHERE id(c) = id(node)` silently wrote scores onto the wrong node type,
+    and the safe pattern established there is to bind by the business key.
+
+    The count is read back from the database instead of assuming
+    `len(vectors)` — a name present in the sidecar but absent from the graph
+    would otherwise be reported as written.
+    """
+    if not validate_cypher_label(concept_label) or not vectors:
+        return 0
+
+    rows = [{"name": name, "v": vector} for name, vector in sorted(vectors.items())]
+    for start in range(0, len(rows), batch_size):
+        client.command(
+            f"UNWIND $rows AS row MATCH (c:{concept_label} {{name: row.name}}) "
+            f"SET c.{VECTOR_PROPERTY_NAME} = row.v",
+            {"rows": rows[start : start + batch_size]},
+            language="cypher",
+        )
+
+    result = client.query(
+        f"SELECT count(*) AS n FROM {concept_label} WHERE {VECTOR_PROPERTY_NAME} IS NOT NULL",
+        language="sql",
+    )
+    return int(result[0].get("n", 0)) if result else 0
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +432,62 @@ def _execute_sync_transaction(client: ArcadeDBClient, payload: GraphPayload) -> 
         raise
 
 
+def _sync_embeddings(
+    client: ArcadeDBClient,
+    payload: GraphPayload,
+    embeddings: EmbeddingsSidecar,
+) -> SyncError | None:
+    """Adds the vector index and writes the vectors, after the nodes exist.
+
+    Runs outside the sync transaction because the index is DDL: creating it
+    inside the same transaction that writes the nodes gives ArcadeDB a schema
+    change and a data change to reconcile at commit, and the index is cheap to
+    rebuild if this step fails.
+    """
+    if not embeddings.vectors:
+        return None
+
+    dimensions = embeddings.dimensions
+    if not dimensions:
+        return SyncError(
+            message="Embeddings carry no dimension count",
+            stage="sync",
+            details=(
+                "The sidecar must record `dimensions`; the vector index "
+                "cannot be created without it."
+            ),
+        )
+
+    widths = {len(v) for v in embeddings.vectors.values()}
+    if widths != {dimensions}:
+        return SyncError(
+            message="Embedding width does not match the recorded dimensions",
+            stage="sync",
+            details=(
+                f"Sidecar declares {dimensions} dimensions but holds vectors of "
+                f"width {sorted(widths)}. Regenerate with --rebuild-embeddings."
+            ),
+        )
+
+    create_vector_schema(client, payload.concept_label, dimensions)
+    written = sync_vectors(client, payload.concept_label, embeddings.vectors)
+
+    if written < len(embeddings.vectors):
+        # Names in the sidecar that no longer exist as concepts. Worth surfacing:
+        # it means the sidecar is stale relative to the compiled ontology.
+        logger.warning(
+            "%d of %d embeddings matched a concept; the sidecar may be stale",
+            written,
+            len(embeddings.vectors),
+        )
+    return None
+
+
 __all__ = [
+    "VECTOR_PROPERTY_NAME",
+    "VECTOR_PROPERTY_TYPE",
     "clear_database",
+    "create_vector_schema",
     "sync_to_arcadedb",
+    "sync_vectors",
 ]

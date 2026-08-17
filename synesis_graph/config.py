@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ except ModuleNotFoundError:
 from synesis_graph.core import (
     DEFAULT_ARCADEDB_ANALYZER,
     DEFAULT_ARCADEDB_URI,
+    DEFAULT_EMBEDDING_MODEL,
     DEFAULT_FULLTEXT_ANALYZER,
     ConnectionError,
     SyncError,
@@ -70,6 +71,12 @@ class ArcadeDBConfig:
     # the two backends unchanged.
     # Not validated here — the set of available analyzers depends on the server build.
     fulltext_analyzer: str = DEFAULT_ARCADEDB_ANALYZER
+    # [arcadedb.embeddings]. The model is per project on purpose: a Portuguese
+    # corpus and an English one have different requirements, and that is a
+    # research decision rather than a code one. `embedding_fields` empty means
+    # the feature is off unless --vector-embeddings names fields.
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embedding_fields: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -101,9 +108,7 @@ def _load_neo4j_config(parsed_cfg: dict[str, Any]) -> Neo4jConfig | ConnectionEr
             user=cfg["user"],
             password=cfg["password"],
             database=cfg.get("database", "neo4j"),
-            fulltext_analyzer=str(
-                cfg.get("fulltext_analyzer") or DEFAULT_FULLTEXT_ANALYZER
-            ),
+            fulltext_analyzer=str(cfg.get("fulltext_analyzer") or DEFAULT_FULLTEXT_ANALYZER),
         )
     except KeyError as e:
         return ConnectionError(
@@ -117,7 +122,6 @@ def _load_neo4j_config(parsed_cfg: dict[str, Any]) -> Neo4jConfig | ConnectionEr
             stage="config",
             details=str(e),
         )
-
 
 
 def _load_arcadedb_config(parsed_cfg: dict[str, Any]) -> ArcadeDBConfig | ConnectionError:
@@ -154,6 +158,28 @@ def _load_arcadedb_config(parsed_cfg: dict[str, Any]) -> ArcadeDBConfig | Connec
             details="Required field missing in [arcadedb]: 'password'",
         )
 
+    # [arcadedb.embeddings] is optional in full: absent, the feature is simply
+    # off, and no existing config breaks.
+    emb = cfg.get("embeddings") or {}
+    if not isinstance(emb, dict):
+        return ConnectionError(
+            message="Error reading ArcadeDB configuration",
+            stage="config",
+            details="[arcadedb.embeddings] must be a table.",
+        )
+
+    raw_fields = emb.get("fields") or []
+    if isinstance(raw_fields, str):
+        # A bare string is almost certainly meant as one field name; accepting it
+        # avoids a confusing "no such field: o" from iterating the characters.
+        raw_fields = [raw_fields]
+    if not isinstance(raw_fields, list):
+        return ConnectionError(
+            message="Error reading ArcadeDB configuration",
+            stage="config",
+            details="[arcadedb.embeddings].fields must be a list of field names.",
+        )
+
     try:
         return ArcadeDBConfig(
             uri=str(uri),
@@ -161,6 +187,8 @@ def _load_arcadedb_config(parsed_cfg: dict[str, Any]) -> ArcadeDBConfig | Connec
             password=str(password),
             database=str(cfg.get("database") or ""),
             fulltext_analyzer=str(cfg.get("fulltext_analyzer") or DEFAULT_ARCADEDB_ANALYZER),
+            embedding_model=str(emb.get("model") or DEFAULT_EMBEDDING_MODEL),
+            embedding_fields=[str(f) for f in raw_fields],
         )
     except Exception as e:
         return ConnectionError(
@@ -237,7 +265,6 @@ def validate_backend_config(config: PipelineConfig, backend: str) -> ConnectionE
         stage="config",
         details=f"Backend '{backend}' does not match loaded configuration type.",
     )
-
 
 
 # ============================================================================

@@ -181,6 +181,136 @@ estratégias de projeção não se aplicam — os algoritmos sempre enxergam o g
 
 ---
 
+## Busca semântica com embeddings vetoriais (ArcadeDB)
+
+A busca full-text encontra conceitos que *compartilham palavras* com a pergunta. A
+busca vetorial encontra conceitos que *significam* o que a pergunta significa. As
+duas são complementares, e o ArcadeDB indexa ambas no mesmo nó.
+
+```bash
+pip install "synesis-graph[embeddings]"
+
+synesis-graph arcadedb --project ./analise.synp \
+    --vector-embeddings ontology_description,topic
+```
+
+### O ganho medido
+
+Medido no corpus FACE/UFMG (210 conceitos, português), com cinco perguntas cujo
+vocabulário é deliberadamente disjunto das descrições:
+
+| Pergunta | Full-text (BM25) | Vetor |
+|---|---|---|
+| "quem manda nas decisões da empresa" | `jogo_de_empresa` ❌ | **`decisões_estratégicas`** ✅ |
+| "empresas endividadas com risco financeiro" | `crescimento_da_empresa` ❌ | **`endividamento_empresarial`** ✅ |
+| "diferenças economicas entre regiões do país" | `setor_externo` ❌ | **`agravamento_das_disparidades_regionais`** ✅ |
+| "como as pessoas decidem errado por vieses" | `processo_de_tomada_de_decisão` ~ | **`vieses_cognitivos`** ✅ |
+
+O vetor acerta o conceito exato em 4 de 5; o BM25, em nenhuma. É o caso do GraphRAG:
+o pesquisador pergunta com as palavras dele, não com o vocabulário controlado da
+ontologia. Mantenha o índice full-text — ele continua melhor quando o termo *está*
+presente.
+
+### Quais campos entram
+
+Os campos são validados contra o seu template. A regra segue o `TYPE` declarado:
+
+| Tipo | Entra? | Por quê |
+|---|---|---|
+| `TEXT` | ✅ | A prosa que define o conceito |
+| `TOPIC` | ✅ | Situa o conceito no campo semântico que a pergunta evoca |
+| `ORDERED`, `ENUMERATED`, `SCALE` | ⚠️ avisa | Vocabulário fechado: todo conceito com o mesmo valor contribui texto idêntico |
+| campo constante | ❌ descartado | Um único valor distinto no corpus não discrimina nada |
+
+O nome do conceito entra sempre. Nem todo `TEXT` é boa escolha: um campo com a
+*justificativa* de uma classificação descreve o critério, não o conceito, e campos
+bipolares (`Low_Cost`/`High_Cost`) colocam antônimos no mesmo vetor.
+
+### Escolha do modelo
+
+Por projeto, no `config.toml` — um corpus em português e um em inglês têm
+exigências diferentes:
+
+```toml
+[arcadedb.embeddings]
+model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+fields = ["ontology_description", "topic"]
+```
+
+| Modelo | Dims | Quando |
+|---|---|---|
+| `paraphrase-multilingual-MiniLM-L12-v2` | 384 | **Padrão** — português e multilíngue (~470 MB) |
+| `all-MiniLM-L6-v2` | 384 | Corpora em inglês; o menor (~90 MB) |
+| `all-mpnet-base-v2` | 768 | Inglês, qualidade acima de velocidade |
+| `cnmoro/portuguese-bge-m3` | 1024 | Português, recall acima de latência (~1,2 GB) |
+
+**Para corpora em português, multilíngue é requisito, não preferência.** Na pergunta
+acima mais dependente de semântica portuguesa, o modelo só-inglês devolveu
+`jogo_de_empresa` — reproduzindo exatamente o erro lexical do BM25.
+
+### Cache
+
+Os vetores vão para `<projeto>.embeddings.json` (coloque no `.gitignore`; são 2,5 MB
+para 210 conceitos). Só os conceitos cujo texto mudou são recalculados, e uma
+execução totalmente cacheada nem carrega o modelo — 11s a frio, 1s a quente no
+face85.
+
+Trocar o modelo ou a lista de campos invalida todos os vetores, por construção:
+vetores de modelos diferentes são individualmente válidos e mutuamente
+incomparáveis. Use `--rebuild-embeddings` para forçar o recálculo completo.
+
+### Consultando
+
+```sql
+SELECT expand(vector.neighbors('Chain[embedding]', <vetor_da_consulta>, 5))
+```
+
+> **Nota:** o ArcadeDB armazena e busca vetores, mas não os gera — é para isso que
+> serve o extra `[embeddings]`. O backend Neo4j não suporta vetores nesta versão.
+
+### Estudos de caso
+
+Dois corpora reais, embedados e consultados ponta a ponta, mostrando que a escolha
+do modelo é decisão por projeto, não um padrão fixo.
+
+| | FACE/UFMG (face85) | Social_Acceptance |
+|---|---|---|
+| Idioma | Português | Inglês |
+| Conceitos | 210 | 1388 |
+| Modelo | `paraphrase-multilingual-MiniLM-L12-v2` (384d) | `all-mpnet-base-v2` (768d) |
+| Campos | `ontology_description`, `topic` | `ontology_description`, `topic` |
+| Tempo de geração (a frio) | 10 s | 116 s |
+| Tamanho do sidecar | 2,5 MB | 32,5 MB |
+
+```bash
+cd face85 && synesis-graph arcadedb --project face85.synp \
+    --vector-embeddings ontology_description,topic
+
+cd Social_Acceptance && synesis-graph arcadedb --project social_acceptance.synp \
+    --vector-embeddings ontology_description,topic
+```
+
+Consultando cada banco com `vector.neighbors`:
+
+```
+face85, "quem manda nas decisões da empresa" (nenhuma palavra em comum com as descrições):
+    decisões_estratégicas       0.3288
+    governança_corporativa      0.3871
+    desempenho_organizacional   0.4291
+
+Social_Acceptance, "why do people distrust offshore wind energy projects":
+    Industry_Attitude           0.3451
+    Preference_Misalignment     0.3529
+    Offshore_Wind               0.3615
+```
+
+O `all-mpnet-base-v2` foi escolhido em vez do menor `all-MiniLM-L6-v2` para o
+Social_Acceptance porque o corpus é grande e só em inglês, então a qualidade extra
+das 768 dimensões compensa o encode mais lento — a tabela de opções acima permite a
+escolha oposta para um corpus onde velocidade importa mais.
+
+---
+
 ## Instalação
 
 Requer **Python 3.10+** e [synesis](https://github.com/synesis-lang/synesis) ≥ 0.10.0.

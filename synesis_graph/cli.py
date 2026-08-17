@@ -217,6 +217,30 @@ _EPILOG_ARCADEDB = _ex(
     "  # Link several projects, as with the neo4j backend:",
     "  synesis-graph arcadedb --project lattes.synp --project abstracts.synp --database Quinto_Andar",  # noqa: E501
     "",
+    "  # Semantic search: embed the concept descriptions. Vectors are generated",
+    "  # locally (no API key) and indexed as LSM_VECTOR alongside the full-text",
+    "  # index, so a question can find a concept whose words it does not share.",
+    "  synesis-graph arcadedb --project project.synp \\",
+    "      --vector-embeddings ontology_description",
+    "",
+    "  # Add the topic for context. Fields are embedded in the order given:",
+    "  synesis-graph arcadedb --project project.synp \\",
+    "      --vector-embeddings ontology_description,topic",
+    "",
+    "  # Vectors are cached in <project>.embeddings.json and only the concepts",
+    "  # whose text changed are recomputed. To force a full recompute:",
+    "  synesis-graph arcadedb --project project.synp \\",
+    "      --vector-embeddings ontology_description --rebuild-embeddings",
+    "",
+    "  # Embeddings need the optional extra (it brings torch, ~2 GB):",
+    '  pip install "synesis-graph[embeddings]"',
+    "",
+    "  # The model is per project, in config.toml — a Portuguese corpus and an",
+    "  # English one have different needs:",
+    "  #   [arcadedb.embeddings]",
+    '  #   model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"',
+    '  #   fields = ["ontology_description", "topic"]',
+    "",
     "  # Note: [arcadedb].uri is the HTTP endpoint (port 2480, the same one that",
     "  # serves ArcadeDB Studio) — not a bolt:// URL. No driver and no server",
     "  # plugin are required.",
@@ -323,7 +347,7 @@ def main(ctx, verbose: int, quiet: int) -> None:
     "--database",
     default=None,
     help="Neo4j database name. Also names the unified graph when linking several "
-         "--project files (otherwise the name is derived from the members).",
+    "--project files (otherwise the name is derived from the members).",
 )
 def neo4j(project, json_input, config, database):
     """Sync a Synesis project to a Neo4j database."""
@@ -357,13 +381,40 @@ def neo4j(project, json_input, config, database):
     "--database",
     default=None,
     help="ArcadeDB database name. Also names the unified graph when linking several "
-         "--project files (otherwise the name is derived from the members).",
+    "--project files (otherwise the name is derived from the members).",
 )
-def arcadedb(project, json_input, config, database):
+@click.option(
+    "--vector-embeddings",
+    "vector_embeddings",
+    default=None,
+    metavar="FIELD,FIELD",
+    help="Ontology fields to embed for semantic search, comma-separated "
+    "(e.g. ontology_description,topic). Each is checked against the "
+    "template; TEXT and TOPIC fields are the ones worth embedding. "
+    "Overrides [arcadedb.embeddings].fields. Needs the extra: "
+    'pip install "synesis-graph[embeddings]"',
+)
+@click.option(
+    "--rebuild-embeddings",
+    is_flag=True,
+    default=False,
+    help="Recompute every vector instead of reusing the cached "
+    "<project>.embeddings.json. Only needed when the vectors are suspect "
+    "for a reason the model/field/text hashes cannot see.",
+)
+def arcadedb(project, json_input, config, database, vector_embeddings, rebuild_embeddings):
     """Sync a Synesis project to an ArcadeDB database."""
     _validate_source(project, json_input)
     from synesis_graph.pipeline import run_pipeline
     from synesis_graph.ui import TaskReporter
+
+    fields = _split_fields(vector_embeddings)
+    if rebuild_embeddings and not fields:
+        # Silently doing nothing would read as "the rebuild happened".
+        raise click.UsageError(
+            "--rebuild-embeddings needs --vector-embeddings (or "
+            "[arcadedb.embeddings].fields in the config)."
+        )
 
     reporter = TaskReporter("Synesis → ArcadeDB")
     head, extras = _split_projects(project)
@@ -375,6 +426,8 @@ def arcadedb(project, json_input, config, database):
         backend=BACKEND_ARCADEDB,
         database=database or None,
         extra_projects=extras,
+        vector_embeddings=fields,
+        rebuild_embeddings=rebuild_embeddings,
     )
     _report_result(reporter, result)
 
@@ -542,6 +595,17 @@ def _split_projects(project) -> tuple[Path | None, list[Path]]:
     if not paths:
         return None, []
     return paths[0], paths[1:]
+
+
+def _split_fields(value: str | None) -> list[str]:
+    """Splits a comma-separated field list, tolerating spaces after commas.
+
+    `--vector-embeddings "a, b"` is what a user naturally types, and an
+    unstripped " b" would be reported as an unknown field.
+    """
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
 def _report_result(reporter, result) -> None:

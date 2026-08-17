@@ -176,6 +176,15 @@ def resolve_arcadedb_analyzer(name: str) -> str:
     return ARCADEDB_ANALYZER_ALIASES.get(name.strip().lower(), name)
 
 
+# Default embedding model. Multilingual is a requirement rather than a
+# preference here: measured against the 210 real face85 concepts, the
+# English-only `all-MiniLM-L6-v2` reproduced BM25's lexical error on the question
+# most dependent on Portuguese semantics, while this model answered it correctly.
+# Lives in core (not in the provider) so config.py can name it without importing
+# anything that pulls in torch.
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+
 def humanize_concept_name(name: str) -> str:
     """Concept name as words, for the full-text index.
 
@@ -249,6 +258,13 @@ class GraphPayload:
     entities: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     # REFERS_TO edges: cypher_label -> [{entity_id, entity, from_bibtex, member}].
     refers_to_edges: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # The template's raw `field_specs`, kept because `analyze_template` splits
+    # fields by destination and drops the declared type: TOPIC and ORDERED both
+    # land in `graph_fields`, TEXT and SCALE both in `scalar_fields`. Embedding
+    # selection needs the type itself (TEXT/TOPIC embed, closed vocabularies do
+    # not), and no other consumer can reconstruct it from the split.
+    # Empty for hand-built payloads, which simply have no fields to validate.
+    field_specs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -598,6 +614,7 @@ def _build_graph_payload(
         from_source=from_source,
         item_fields=item_fields,
         taxonomy_edges=taxonomy_edges,
+        field_specs=json_data.get("template", {}).get("field_specs", {}),
     )
 
 

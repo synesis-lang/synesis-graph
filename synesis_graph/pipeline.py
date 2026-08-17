@@ -198,6 +198,8 @@ def run_pipeline(
     json_path: Path | None = None,
     database: str | None = None,
     extra_projects: list[Path] | None = None,
+    vector_embeddings: list[str] | None = None,
+    rebuild_embeddings: bool = False,
 ) -> PipelineResult:
     """
     Executes complete pipeline: compilation → connection → synchronization.
@@ -214,6 +216,10 @@ def run_pipeline(
         extra_projects: Additional .synp projects to link with project_path. When
             present, identities declared with IDENTIFIES/REFERS TO are reified
             across all members. Defaults to None (single-project path unchanged).
+        vector_embeddings: ontology field names to embed (ArcadeDB only).
+            Overrides [arcadedb.embeddings].fields, as --database overrides its
+            config counterpart.
+        rebuild_embeddings: recompute every vector, ignoring the cached sidecar.
 
     Returns:
         PipelineResult indicating success or typed error.
@@ -320,6 +326,29 @@ def run_pipeline(
     # single project, or the members joined by "_" for a link).
     if database:
         payload.project_name = database
+
+    # 3b. Embeddings, when asked for. Runs before the sync so a validation error
+    # (an unknown field name) costs nothing: the database is untouched.
+    if backend == BACKEND_ARCADEDB and isinstance(config, ArcadeDBConfig):
+        fields = vector_embeddings or config.embedding_fields
+        if fields:
+            from synesis_graph.embeddings_provider import prepare_embeddings
+
+            sidecar = prepare_embeddings(
+                payload=payload,
+                fields=list(fields),
+                model_name=config.embedding_model,
+                project_path=project_path,
+                reporter=reporter,
+                rebuild=rebuild_embeddings,
+            )
+            if isinstance(sidecar, PipelineError):
+                reporter.error(f"{sidecar.message} — {sidecar.details}")
+                return PipelineResult(success=False, error=sidecar)
+            # Vectors are ArcadeDB-only, so the sidecar rides on that adapter
+            # rather than on the BackendAdapter contract every backend shares.
+            if isinstance(adapter, ArcadeDBBackendAdapter):
+                adapter.embeddings = sidecar
 
     # 4. Backend synchronization via adapter contract
     backend_error = execute_backend_pipeline(adapter, payload, reporter)

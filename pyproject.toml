@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synesis-graph"
-version = "0.6.0"
+version = "0.7.0"
 description = "Universal pipeline from Synesis projects to graph databases and HTML visualizations"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,6 +39,11 @@ dependencies = [
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
+# Geracao local de embeddings para busca semantica. Extra opcional porque
+# sentence-transformers traz torch (~2 GB) — desproporcional para quem usa o
+# modulo so para sincronizar o grafo. O codigo importa preguicosamente e
+# reporta DependencyError quando ausente, nunca ImportError.
+embeddings = ["sentence-transformers>=3.0"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

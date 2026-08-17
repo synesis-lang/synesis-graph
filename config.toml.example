@@ -70,6 +70,38 @@ password = "CHANGE_ME"
 # "governanca" (no cedilla) then still matches "governança_corporativa".
 # fulltext_analyzer = "brazilian"
 
+# [arcadedb.embeddings]
+# Vector embeddings for semantic search (optional — absent, the feature is off).
+#
+# Vectors let a question reach a concept whose words it does not share:
+# "quem manda nas decisões da empresa" finds `decisões_estratégicas`, which
+# full-text search misses because they have no word in common. The two are
+# complementary, not substitutes — the full-text index still wins when the
+# term is present.
+#
+# Requires the optional extra (it brings torch, ~2 GB):
+#   pip install "synesis-graph[embeddings]"
+#
+# model: any sentence-transformers model. Per project on purpose: a Portuguese
+#        corpus and an English one have different needs, and that is a research
+#        decision. An English-only model on a Portuguese corpus reproduces the
+#        very lexical error vectors are meant to fix.
+#          paraphrase-multilingual-MiniLM-L12-v2  384d, ~470 MB — default, PT/multi
+#          all-MiniLM-L6-v2                       384d, ~90 MB  — English only
+#          all-mpnet-base-v2                      768d          — English, higher quality
+#          cnmoro/portuguese-bge-m3              1024d, ~1.2 GB — PT, recall over speed
+# fields: ontology fields to embed, in order. TEXT and TOPIC are the ones worth
+#         embedding; closed vocabularies (ORDERED/ENUMERATED/SCALE) repeat the
+#         same text across every concept sharing a value. Overridden by
+#         --vector-embeddings on the command line.
+#
+# The concept name is always included and needs no declaring.
+# Vectors are cached in <project>.embeddings.json (git-ignored); only concepts
+# whose text changed are recomputed.
+
+# model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# fields = ["ontology_description", "topic"]
+
 [html]
 # HTML graph output settings (all fields optional — sensible defaults apply)
 #

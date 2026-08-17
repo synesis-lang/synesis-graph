@@ -13,6 +13,11 @@ tests/.vscode/
 *.html
 graphs/
 
+# Embedding sidecars — derived from the .syno, regenerable, and large: 113 KB
+# for face85 (210 concepts) without vectors, ~17 MB for Social_Acceptance once
+# vectors land. Never versioned.
+*.embeddings.json
+
 # Credentials — NEVER commit
 config.toml
 .env

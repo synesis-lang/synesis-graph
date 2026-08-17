@@ -25,6 +25,7 @@ from synesis_graph.core import (
     SyncError,
     get_neo4j_driver_factory,
 )
+from synesis_graph.embeddings import EmbeddingsSidecar
 from synesis_graph.metrics import compute_metrics
 from synesis_graph.metrics_arcadedb import compute_metrics as compute_arcadedb_metrics
 from synesis_graph.sanitize import sanitize_arcadedb_database_name, sanitize_database_name
@@ -50,9 +51,7 @@ def _notification_filter() -> dict[str, Any]:
 
     verbose = logging.getLogger("synesis2graph").isEnabledFor(logging.DEBUG)
     severity = (
-        NotificationMinimumSeverity.INFORMATION
-        if verbose
-        else NotificationMinimumSeverity.WARNING
+        NotificationMinimumSeverity.INFORMATION if verbose else NotificationMinimumSeverity.WARNING
     )
     return {"notifications_min_severity": severity}
 
@@ -205,9 +204,7 @@ class Neo4jBackendAdapter(BackendAdapter):
             )
 
         with reporter.step("Synchronizing Graph (Transactional)"):
-            sync_error = sync_to_neo4j(
-                self.session, payload, self.config.fulltext_analyzer
-            )
+            sync_error = sync_to_neo4j(self.session, payload, self.config.fulltext_analyzer)
             if sync_error:
                 return sync_error
         return None
@@ -259,6 +256,10 @@ class ArcadeDBBackendAdapter(BackendAdapter):
         self.config = config
         self.client: ArcadeDBClient | None = None
         self.db_name = config.database or ""
+        # Set by the pipeline when --vector-embeddings (or the config block) asks
+        # for them. Kept off the BackendAdapter contract because no other backend
+        # has anywhere to put a vector yet.
+        self.embeddings: EmbeddingsSidecar | None = None
 
     @property
     def backend_name(self) -> str:
@@ -318,9 +319,7 @@ class ArcadeDBBackendAdapter(BackendAdapter):
 
         # An explicit `database` in the config wins; otherwise the project names it,
         # matching the Neo4j adapter's behaviour.
-        requested = self.config.database or sanitize_arcadedb_database_name(
-            payload.project_name
-        )
+        requested = self.config.database or sanitize_arcadedb_database_name(payload.project_name)
         self.db_name = requested
         self.client.database = requested
         reporter.info(f"Target database: {requested}")
@@ -369,9 +368,13 @@ class ArcadeDBBackendAdapter(BackendAdapter):
                 stage="connection",
             )
 
-        with reporter.step("Synchronizing Graph (Transactional)"):
+        label = "Synchronizing Graph (Transactional)"
+        if self.embeddings is not None and self.embeddings.vectors:
+            label = f"{label} + {len(self.embeddings.vectors)} vectors"
+
+        with reporter.step(label):
             sync_error = sync_to_arcadedb(
-                self.client, payload, self.config.fulltext_analyzer
+                self.client, payload, self.config.fulltext_analyzer, self.embeddings
             )
             if sync_error:
                 return sync_error
@@ -399,8 +402,6 @@ class ArcadeDBBackendAdapter(BackendAdapter):
         if self.client is not None:
             self.client.close()
             self.client = None
-
-
 
 
 # ============================================================================

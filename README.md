@@ -1,6 +1,6 @@
 # synesis-graph: Universal Graph Pipeline
 
-[![Synesis](https://img.shields.io/badge/Synesis-Language-blue?style=for-the-badge)](https://synesis-lang.github.io/synesis-docs) ![Python](https://img.shields.io/badge/Python-3.10%2B-yellow?style=for-the-badge) ![Backends](https://img.shields.io/badge/Backends-Neo4j%20%7C%20HTML-blueviolet?style=for-the-badge) ![License](https://img.shields.io/badge/License-AGPL%20v3%20%2B%20exception-green?style=for-the-badge)
+[![Synesis](https://img.shields.io/badge/Synesis-Language-blue?style=for-the-badge)](https://synesis-lang.github.io/synesis-docs) ![Python](https://img.shields.io/badge/Python-3.10%2B-yellow?style=for-the-badge) ![Backends](https://img.shields.io/badge/Backends-Neo4j%20%7C%20ArcadeDB%20%7C%20HTML-blueviolet?style=for-the-badge) ![License](https://img.shields.io/badge/License-AGPL%20v3%20%2B%20exception-green?style=for-the-badge)
 
 > **Transform your qualitative research into a living, navigable Knowledge Graph ready for AI (GraphRAG).**
 
@@ -177,6 +177,136 @@ GDS metrics calculation automatically adapts to template type:
 ArcadeDB ships a native algorithm library, so no plugin is involved and there is no
 degraded path: `pagerank`, `betweenness` and `community` are always computed. Graph
 projection strategies do not apply — the algorithms always see the full graph.
+
+---
+
+## Semantic Search with Vector Embeddings (ArcadeDB)
+
+Full-text search finds concepts that *share words* with the question. Vector search
+finds concepts that *mean* what the question means. The two are complementary, and
+ArcadeDB indexes both on the same node.
+
+```bash
+pip install "synesis-graph[embeddings]"
+
+synesis-graph arcadedb --project ./analysis.synp \
+    --vector-embeddings ontology_description,topic
+```
+
+### What it buys you
+
+Measured on the FACE/UFMG corpus (210 concepts, Portuguese), with five questions
+whose vocabulary is deliberately disjoint from the concept descriptions:
+
+| Question | Full-text (BM25) | Vector |
+|---|---|---|
+| "quem manda nas decisões da empresa" | `jogo_de_empresa` ❌ | **`decisões_estratégicas`** ✅ |
+| "empresas endividadas com risco financeiro" | `crescimento_da_empresa` ❌ | **`endividamento_empresarial`** ✅ |
+| "diferenças economicas entre regiões do país" | `setor_externo` ❌ | **`agravamento_das_disparidades_regionais`** ✅ |
+| "como as pessoas decidem errado por vieses" | `processo_de_tomada_de_decisão` ~ | **`vieses_cognitivos`** ✅ |
+
+The vector search returns the exact concept in 4 of 5; BM25 in none. This is the
+GraphRAG case: the researcher asks in their own words, not in the ontology's
+controlled vocabulary. Keep the full-text index — it still wins when the term
+*is* present.
+
+### Which fields to embed
+
+Fields are validated against your template. The rule follows the declared `TYPE`:
+
+| Type | Embedded? | Why |
+|---|---|---|
+| `TEXT` | ✅ | The prose that defines the concept |
+| `TOPIC` | ✅ | Situates it in a semantic field the question evokes |
+| `ORDERED`, `ENUMERATED`, `SCALE` | ⚠️ warns | Closed vocabulary: every concept sharing a value contributes identical text |
+| any constant field | ❌ skipped | One distinct value across the corpus discriminates nothing |
+
+The concept name is always included. Not every `TEXT` field is a good choice: a
+field holding the *reason* for a classification describes the criterion, not the
+concept, and bipolar fields (`Low_Cost`/`High_Cost`) put antonyms in one vector.
+
+### Choosing a model
+
+Per project, in `config.toml` — a Portuguese corpus and an English one have
+different needs:
+
+```toml
+[arcadedb.embeddings]
+model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+fields = ["ontology_description", "topic"]
+```
+
+| Model | Dims | When |
+|---|---|---|
+| `paraphrase-multilingual-MiniLM-L12-v2` | 384 | **Default** — Portuguese and multilingual (~470 MB) |
+| `all-MiniLM-L6-v2` | 384 | English corpora; smallest (~90 MB) |
+| `all-mpnet-base-v2` | 768 | English, quality over speed |
+| `cnmoro/portuguese-bge-m3` | 1024 | Portuguese, recall over latency (~1.2 GB) |
+
+**Multilingual is a requirement, not a preference, for Portuguese corpora.** On the
+question above most dependent on Portuguese semantics, the English-only model
+returned `jogo_de_empresa` — reproducing exactly the lexical error BM25 makes.
+
+### Caching
+
+Vectors are written to `<project>.embeddings.json` (add it to `.gitignore`; it is
+2.5 MB for 210 concepts). Only concepts whose text changed are recomputed, and a
+fully cached run does not load the model at all — 11s cold, 1s warm on face85.
+
+Changing the model or the field list invalidates every vector, by design: vectors
+from different models are individually valid and mutually meaningless. Use
+`--rebuild-embeddings` to force a full recompute.
+
+### Querying
+
+```sql
+SELECT expand(vector.neighbors('Chain[embedding]', <query_vector>, 5))
+```
+
+> **Note:** ArcadeDB stores and searches vectors but does not generate them —
+> that is what the `[embeddings]` extra is for. The Neo4j backend does not
+> support vectors in this version.
+
+### Case studies
+
+Two real corpora, embedded and queried end to end, showing the model choice is a
+per-project decision rather than a fixed default.
+
+| | FACE/UFMG (face85) | Social_Acceptance |
+|---|---|---|
+| Language | Portuguese | English |
+| Concepts | 210 | 1388 |
+| Model | `paraphrase-multilingual-MiniLM-L12-v2` (384d) | `all-mpnet-base-v2` (768d) |
+| Fields | `ontology_description`, `topic` | `ontology_description`, `topic` |
+| Generation time (cold) | 10 s | 116 s |
+| Sidecar size | 2.5 MB | 32.5 MB |
+
+```bash
+cd face85 && synesis-graph arcadedb --project face85.synp \
+    --vector-embeddings ontology_description,topic
+
+cd Social_Acceptance && synesis-graph arcadedb --project social_acceptance.synp \
+    --vector-embeddings ontology_description,topic
+```
+
+Querying each database with `vector.neighbors`:
+
+```
+face85, "quem manda nas decisões da empresa" (no shared word with any description):
+    decisões_estratégicas       0.3288
+    governança_corporativa      0.3871
+    desempenho_organizacional   0.4291
+
+Social_Acceptance, "why do people distrust offshore wind energy projects":
+    Industry_Attitude           0.3451
+    Preference_Misalignment     0.3529
+    Offshore_Wind               0.3615
+```
+
+`all-mpnet-base-v2` was chosen over the smaller `all-MiniLM-L6-v2` for
+Social_Acceptance because the corpus is large and English-only, so the extra
+768-dimension quality is worth the slower encode — the tradeoff table above lets
+you make the opposite call for a corpus where speed matters more.
 
 ---
 
