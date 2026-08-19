@@ -1,0 +1,36 @@
+version: 2
+
+# Atualizacoes automaticas de versao DESLIGADAS (2026-08-18).
+#
+# O volume de PRs no ecossistema superava o ganho. As GitHub Actions estao
+# pinadas por SHA de commit, de modo que um bump de tag nao altera o que roda
+# no CI.
+#
+# O que NAO esta desligado: os *security updates*, controlados em
+# Settings > Code security. Alertas de vulnerabilidade continuam chegando, e o
+# job `security` do CI roda pip-audit a cada push. Desligar as duas coisas
+# deixaria as actions pinadas sem caminho de atualizacao — pin sem auditoria e
+# risco, nao protecao.
+#
+# Este arquivo nao existia: a configuracao vinha so da interface do GitHub.
+# Versionar a decisao a torna revisavel junto com o codigo.
+#
+# Para religar: troque `open-pull-requests-limit: 0` por um numero > 0.
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 0 = nenhum PR de atualizacao de versao.
+    open-pull-requests-limit: 0
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
