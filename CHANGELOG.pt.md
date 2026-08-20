@@ -13,6 +13,32 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ## [Não lançado]
 
+### Adicionado — testes de contrato para valores `ORDERED` vindos do compilador
+
+- **Nenhuma mudança de código foi necessária**, mas a garantia passa a ser fixada
+  por testes. Desde que o synesis canonizou `ORDERED` (o dado gravado é sempre o
+  **índice**, um `int`; escrever o rótulo é erro `E088`), `_index_to_label`
+  resolve **todos** os valores para o rótulo declarado, e não apenas os que por
+  acaso chegavam como inteiros.
+
+  No contrato misto anterior, um rótulo chegava ao grafo intacto, de modo que
+  `Econômico` e `ECONÔMICO` viravam **dois nós de taxonomia distintos** —
+  fragmentação silenciosa do mesmo aspecto. Com índices isso é inalcançável: o
+  dado é `11` e existe exatamente um rótulo canônico.
+
+  Verificado de ponta a ponta contra um projeto real de 210 conceitos: 13
+  aspectos distintos, nenhum valor numérico chegando ao grafo.
+
+  Os testes estão em `tests/test_ordered_contract.py` porque a verificação
+  ponta a ponta de `test_linkage.py`, que também cobriria isso, é pulada sempre
+  que o corpus Davi está ausente (dados de campo, não versionados).
+
+- **O canal `value_maps` continua necessário.** Os backends nunca o leem
+  diretamente — recebem conceitos com os rótulos já resolvidos por
+  `_extract_concepts` —, então é ele que leva o mapa índice→rótulo até o ponto de
+  resolução. `_index_to_label` mudou de papel, não de necessidade: deixou de
+  reparar um dado ambíguo e passou a ser apresentação.
+
 ---
 
 ## [0.7.0] - 2026-08-17

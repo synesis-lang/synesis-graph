@@ -13,6 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — contract tests for `ORDERED` values from the compiler
+
+- **No code change was needed**, but the guarantee is now pinned by tests. Since
+  synesis canonicalised `ORDERED` (the stored datum is always the **index**, an
+  `int`; writing the label is error `E088`), `_index_to_label` resolves every
+  value to the declared label instead of only those that happened to arrive as
+  integers.
+
+  Under the previous mixed contract a label reached the graph untouched, so
+  `Econômico` and `ECONÔMICO` became **two distinct taxonomy nodes** — silent
+  fragmentation of the same aspect. With indices that is unreachable: the datum
+  is `11` and exactly one canonical label exists.
+
+  Verified end to end against a real 210-concept project: 13 distinct aspects,
+  no numeric value reaching the graph.
+
+  The tests live in `tests/test_ordered_contract.py` because the end-to-end
+  check in `test_linkage.py` that would also cover this is skipped whenever the
+  Davi corpus is absent (field data, not versioned).
+
+- **`value_maps` remains necessary.** Backends never read it directly — they
+  receive concepts with labels already resolved by `_extract_concepts` — so the
+  channel is what carries the index→label map to the point of resolution.
+  `_index_to_label` changed role, not necessity: it is no longer repairing an
+  ambiguous datum, it is presentation.
+
 ---
 
 ## [0.7.0] - 2026-08-17
