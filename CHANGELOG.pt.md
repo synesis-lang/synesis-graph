@@ -13,6 +13,102 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ## [Não lançado]
 
+## [0.8.0] - 2026-08-23
+
+### Adicionado — o grafo exportado agora se descreve (`ProjectContext`)
+
+Todo sync para um backend de banco grava um vértice `ProjectContext` com o
+contexto do próprio projeto. **O contexto viaja com os dados, não com a
+ferramenta**: qualquer consumidor do grafo o recebe — Claude Desktop, qualquer
+cliente MCP, o studio do próprio banco, ou um colega que receba uma cópia.
+
+O problema que resolve: o grafo exportado era *sintaxe sem semântica*. Um
+consumidor que fizesse introspecção do schema descobria que o vértice `Aspect`
+tem uma propriedade `name`, mas não que `Aspect` é a escala modal de Dooyeweerd,
+que seus valores são **ordenados**, nem o que significa `[15] Fiducial`. Tudo
+isso está declarado no template e era descartado na exportação.
+
+Propriedades gravadas:
+
+| Propriedade | Conteúdo |
+|---|---|
+| `description` | o bloco `DESCRIPTION` do `.synp`, literal |
+| `project_summary` | metadados, tamanho do corpus e proveniência, em prosa |
+| `template_doc` | o template como documento legível: cada campo com tipo, escopo, descrição, escala de valores e **GUIDELINES**, mais as regras de preenchimento e uma seção **`## Como navegar o grafo`** que nomeia cada aresta com sua direção |
+| `concept_label`, `template_name`, `project_name` | identificadores |
+| `source_count`, `item_count`, `concept_count` | inteiros, consultáveis sem parse |
+| `compiler_version`, `synesis_graph_version`, `compiled_at`, `generated_at` | proveniência |
+
+Nada de novo é extraído do compilador: o JSON canônico já trazia tudo. O
+`prepare_payload` lia o objeto `project` apenas para pegar o nome.
+
+**Gravado em Markdown, não JSON.** Medido pelo caminho MCP real contra um corpus
+de 210 conceitos: como JSON, as especificações de campo chegavam ao modelo como
+~7,3 mil tokens em que **53% das chaves valiam `null`**, com as GUIDELINES —
+escritas pelo pesquisador com títulos e quebras de linha — escapadas dentro de
+uma string. O mesmo conteúdo em prosa é menor, dispensa parse e preserva a forma
+que o pesquisador lhe deu.
+
+As `GUIDELINES` são a parte de maior valor: são o **protocolo de codificação**,
+com regras de decisão explícitas e exemplos ("não inclua nome próprio", "1–3
+frases"). Respondem o que nenhum schema responde — *por que* um dado está assim,
+e o que conta como instância válida de um campo. Até agora viviam só no `.synt` e
+não deixavam rastro no grafo.
+
+- **Backends:** ArcadeDB (TCP/HTTP) e Neo4j. O backend HTML fica de fora de
+  propósito — é artefato de visualização, sem consumidor programático, e para
+  quem lê na tela o contexto já está implícito.
+- **As contagens são medidas do que chega ao grafo**, nunca copiadas do
+  `export_metadata` do compilador: os contadores dele respondem outra pergunta
+  (seu `item_count` conta blocos SOURCE, não os vértices `Item` que o sync
+  grava), então guardá-los produziria uma propriedade que *parece* verificável
+  contra o grafo e discorda dele em silêncio.
+- **Chaves `location` são removidas recursivamente.** São caminhos absolutos da
+  máquina que compilou o projeto, inúteis a qualquer consumidor e indesejáveis
+  num grafo compartilhado. Aparecem em dois níveis — no campo e dentro de cada
+  entrada de `values[]` —, então uma limpeza superficial deixaria a maior parte.
+- **A instância única é garantida** pela limpeza que ambos os backends já fazem
+  antes de sincronizar; nenhuma lógica de upsert foi necessária.
+- **O ArcadeDB declara as propriedades de texto do contexto** mesmo sem indexar
+  nenhuma. Todo o resto ali declara só o que um índice exige, mas um tipo sem
+  propriedades declaradas aparece na introspecção como vértice vazio — e um
+  cliente MCP não tinha como saber que havia contexto ali.
+
+### Corrigido — seção `[neo4j]` ausente reportava um erro sem sentido
+
+- Rodar o backend Neo4j contra um config escrito para outro backend falhava com
+  `Required field missing in [neo4j]: 'neo4j'` — um campo dentro de uma seção que
+  não existe. O caso de seção ausente passa a ser tratado à parte do de campo
+  ausente, e a mensagem nomeia as seções que o arquivo realmente tem.
+- Um `uri` ausente era exibido com aspas duplicadas (`"'uri'"`).
+
+
+### Adicionado — testes de contrato para valores `ORDERED` vindos do compilador
+
+- **Nenhuma mudança de código foi necessária**, mas a garantia passa a ser fixada
+  por testes. Desde que o synesis canonizou `ORDERED` (o dado gravado é sempre o
+  **índice**, um `int`; escrever o rótulo é erro `E088`), `_index_to_label`
+  resolve **todos** os valores para o rótulo declarado, e não apenas os que por
+  acaso chegavam como inteiros.
+
+  No contrato misto anterior, um rótulo chegava ao grafo intacto, de modo que
+  `Econômico` e `ECONÔMICO` viravam **dois nós de taxonomia distintos** —
+  fragmentação silenciosa do mesmo aspecto. Com índices isso é inalcançável: o
+  dado é `11` e existe exatamente um rótulo canônico.
+
+  Verificado de ponta a ponta contra um projeto real de 210 conceitos: 13
+  aspectos distintos, nenhum valor numérico chegando ao grafo.
+
+  Os testes estão em `tests/test_ordered_contract.py` porque a verificação
+  ponta a ponta de `test_linkage.py`, que também cobriria isso, é pulada sempre
+  que o corpus Davi está ausente (dados de campo, não versionados).
+
+- **O canal `value_maps` continua necessário.** Os backends nunca o leem
+  diretamente — recebem conceitos com os rótulos já resolvidos por
+  `_extract_concepts` —, então é ele que leva o mapa índice→rótulo até o ponto de
+  resolução. `_index_to_label` mudou de papel, não de necessidade: deixou de
+  reparar um dado ambíguo e passou a ser apresentação.
+
 ---
 
 ## [0.7.0] - 2026-08-17

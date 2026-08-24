@@ -37,6 +37,7 @@ relationship types). They differ in how the advanced metrics are scoped — see
 * **Automatic Metrics:** Calculates network metrics at two levels:
     * **Native Metrics:** Always available via pure Cypher.
     * **GDS Metrics:** Advanced algorithms when the Graph Data Science plugin is installed.
+* **Self-Describing Graphs:** Every sync writes a `ProjectContext` vertex carrying your template's semantics — field descriptions, value scales and **GUIDELINES** — so any consumer of the graph, from Claude Desktop to any MCP client, knows what the data *means*.
 * **Full Traceability:** Every node and edge maintains origin metadata (`source_file`, `line`, `column`), ensuring scientific auditability.
 
 ---
@@ -94,6 +95,68 @@ END FIELD
 ```
 (:Item)-[:MENTIONS]->(:Category)-[:GROUPED_BY]->(:Theme)
 ```
+
+---
+
+## Self-Describing Graphs: `ProjectContext`
+
+Every sync to a database backend writes a single `ProjectContext` vertex carrying
+the project's own context. **The context travels with the data, not with the
+tool.**
+
+Without it, an exported graph is *syntax without semantics*. A consumer that
+introspects the schema learns that a vertex `Aspect` has a property `name` — but
+not that `Aspect` is Dooyeweerd's modal scale, that its values are **ordered**,
+or what `[15] Fiducial` means. All of that is declared in your template, and used
+to be discarded at export time.
+
+### What it holds
+
+| Property | Content |
+|---|---|
+| `description` | your `.synp` `DESCRIPTION` block, verbatim |
+| `project_summary` | metadata, corpus size and provenance, as prose |
+| `template_doc` | the template as a readable document — every field with its type, scope, description, value scale and **GUIDELINES**, plus the validation rules and a `## Como navegar o grafo` section naming every edge with its direction |
+| `source_count`, `item_count`, `concept_count` | integers, queryable without parsing |
+| `compiler_version`, `synesis_graph_version`, `compiled_at`, `generated_at` | provenance |
+
+### Why it matters
+
+**It answers questions no schema can.** The `GUIDELINES` you wrote for each field
+are your **coding protocol** — the explicit decision rules and examples that say
+what counts as a valid instance of a field. An assistant reading them stops
+inferring your criteria from the data and starts *knowing* them.
+
+**It is derived, never hardcoded.** Two projects with different templates produce
+different documents: one may have `aspect` on a 16-value philosophical scale,
+another `categoria_resultado` with its own vocabulary. Nothing here assumes one
+project's words.
+
+**It cannot silently drift.** Both backends clear the graph before syncing, so
+the context always describes *that* snapshot. `generated_at` lets a consumer say
+"this graph is three months old" instead of presenting stale data as current.
+
+**It is Markdown, not JSON.** Measured through a real MCP client: as JSON the
+field specs arrived as ~7.3k tokens with 53% of the keys `null`, and the
+GUIDELINES — which you wrote with headings and line breaks — came escaped inside
+a string. Prose is smaller, needs no parsing, and keeps the shape you gave it.
+
+### Reading it
+
+```cypher
+// Cheap orientation: what is this graph about, and how big?
+MATCH (p:ProjectContext) RETURN p.description, p.project_summary
+
+// The full template semantics, when a question needs them
+MATCH (p:ProjectContext) RETURN p.template_doc
+```
+
+Backends: **ArcadeDB** and **Neo4j**. The HTML backend is out of scope — it is a
+visualisation artifact with no programmatic consumer, and for a human reading it
+on screen the context is already implicit.
+
+A graph produced by an earlier version simply has no such vertex; consumers
+should treat its absence as "no context available", not as an error.
 
 ---
 

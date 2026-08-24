@@ -28,6 +28,7 @@ from synesis_graph.backends.neo4j import (
     _sync_from_source,
     _sync_items,
     _sync_mentions,
+    _sync_project_context,
     _sync_refers_to,
     _sync_sources,
     _sync_taxonomies,
@@ -49,6 +50,17 @@ logger = logging.getLogger("synesis2graph")
 # `_create_search_indexes` in the Neo4j backend.
 ITEM_TEXT_PROPS = ("citation", "description")
 SOURCE_TEXT_PROPS = ("title", "abstract")
+
+# Declared so schema introspection announces the context instead of showing an
+# empty vertex type. Only the STRING-typed ones: the counts are integers and
+# ArcadeDB would reject them under a STRING declaration.
+PROJECT_CONTEXT_TEXT_PROPS = (
+    "project_name",
+    "description",
+    "template_doc",
+    "project_summary",
+    "concept_label",
+)
 
 
 class _CypherRunner:
@@ -148,7 +160,12 @@ def _create_schema(client: ArcadeDBClient, payload: GraphPayload) -> None:
     concept_label = payload.concept_label
 
     # Vertex types: the structural ones plus the dynamic concept and taxonomy labels.
-    vertex_types = ["Source", "Item"]
+    # `ProjectContext` is declared unconditionally even though the payload may
+    # carry none: declaring a type costs nothing, and an empty type is a clearer
+    # signal to whoever inspects the schema than a type that sometimes exists.
+    # None of its properties are declared — only indexed ones need to be, and the
+    # context is read whole, never searched.
+    vertex_types = ["Source", "Item", "ProjectContext"]
     if validate_cypher_label(concept_label):
         vertex_types.append(concept_label)
     vertex_types.extend(get_taxonomy_labels(payload.graph_fields))
@@ -157,6 +174,16 @@ def _create_schema(client: ArcadeDBClient, payload: GraphPayload) -> None:
     for type_name in vertex_types:
         if validate_cypher_label(type_name):
             client.command(f"CREATE VERTEX TYPE {type_name} IF NOT EXISTS", language="sql")
+
+    # ProjectContext's properties are declared even though none is indexed.
+    # Everything else in this function declares only what an index needs, but a
+    # type with no declared properties shows up in `get_schema` as an empty
+    # vertex — which is how an MCP client discovers the graph. Observed against
+    # face85: introspection listed `ProjectContext (no properties)`, so a model
+    # had no way to learn the context was there at all. Declaring them makes the
+    # vertex self-announcing, which is the whole point of writing it.
+    for prop in PROJECT_CONTEXT_TEXT_PROPS:
+        _declare_property(client, "ProjectContext", prop)
 
     # Properties backing the uniqueness indexes.
     _declare_property(client, "Source", "bibtex")
@@ -416,6 +443,9 @@ def _execute_sync_transaction(client: ArcadeDBClient, payload: GraphPayload) -> 
     tx = _CypherRunner(client)
     client.begin()
     try:
+        # Same position as in `sync_to_neo4j`: first, and inside the transaction,
+        # so the context never outlives a sync that failed halfway.
+        _sync_project_context(tx, payload.project_context)
         _sync_sources(tx, payload.sources)
         _sync_items(tx, payload.items)
         _sync_from_source(tx, payload.from_source)
