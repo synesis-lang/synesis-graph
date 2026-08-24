@@ -42,6 +42,36 @@ class TestLoadConfigNeo4j:
         assert result.user == "neo4j"
         assert result.password == "test"
 
+    def test_missing_section_names_the_section_not_a_field(self, config_file):
+        """A file configured for another backend must say so, plainly.
+
+        `parsed_cfg["neo4j"]` raises `KeyError('neo4j')` when the whole section is
+        absent; folding that into the missing-field handler produced "Required
+        field missing in [neo4j]: 'neo4j'" — a field inside a section that does
+        not exist. Reported from a real project set up for ArcadeDB only.
+        """
+        path = config_file('[arcadedb]\nuri = "http://localhost:2480"\npassword = "x"\n')
+        result = load_config(path, BACKEND_NEO4J)
+        assert isinstance(result, ConnectionError)
+        assert "Missing [neo4j] section" in result.details
+        # Names what the file actually has, so the fix is obvious.
+        assert "[arcadedb]" in result.details
+        assert "Required field missing" not in result.details
+
+    def test_missing_uri_is_not_double_quoted(self, config_file):
+        # `KeyError` quotes the key itself; quoting it again rendered "'uri'".
+        path = config_file('[neo4j]\nuser = "neo4j"\npassword = "x"\n')
+        result = load_config(path, BACKEND_NEO4J)
+        assert isinstance(result, ConnectionError)
+        assert "'uri'" in result.details
+        assert "\"'uri'\"" not in result.details
+
+    def test_section_of_the_wrong_type_is_reported(self, config_file):
+        path = config_file('neo4j = "oops"\n')
+        result = load_config(path, BACKEND_NEO4J)
+        assert isinstance(result, ConnectionError)
+        assert "must be a table" in result.details
+
     def test_missing_password_returns_error(self, config_file):
         path = config_file(TOML_NEO4J_MISSING_PASSWORD)
         result = load_config(path, BACKEND_NEO4J)
@@ -303,5 +333,3 @@ class TestSupportedBackends:
             tmp_path,
         )
         assert isinstance(result, ConnectionError)
-
-

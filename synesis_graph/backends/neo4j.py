@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from synesis_graph.core import (
     DEFAULT_FULLTEXT_ANALYZER,
     GraphPayload,
+    ProjectContextSpec,
     SyncError,
     get_taxonomy_labels,
     text_source_field_names,
@@ -130,6 +132,7 @@ def _create_search_indexes(
     normalises from the template's QUOTATION and MEMO fields, so they hold
     regardless of what the template calls them.
     """
+
     def _props(alias: str, fields: list[str]) -> str:
         return ", ".join(f"{alias}.{f}" for f in fields if validate_cypher_label(f))
 
@@ -172,6 +175,10 @@ def _create_search_indexes(
 def _execute_sync_transaction(session: Any, payload: GraphPayload) -> None:
     """Executes all sync operations in a single transaction."""
     with session.begin_transaction() as tx:
+        # First, and inside the transaction: the context describes this snapshot,
+        # so it must not outlive a sync that failed halfway. It depends on no
+        # other node, hence the position.
+        _sync_project_context(tx, payload.project_context)
         _sync_sources(tx, payload.sources)
         _sync_items(tx, payload.items)
         _sync_from_source(tx, payload.from_source)
@@ -182,6 +189,34 @@ def _execute_sync_transaction(session: Any, payload: GraphPayload) -> None:
         _sync_entities(tx, payload.entities)
         _sync_refers_to(tx, payload.refers_to_edges)
         tx.commit()
+
+
+def _sync_project_context(tx: Any, context: ProjectContextSpec | None) -> None:
+    """Writes the project's own context as a single `ProjectContext` vertex.
+
+    This is what makes the exported graph self-describing. Without it a consumer
+    introspecting the schema learns that a taxonomy vertex has a `name`, but not
+    what the scale means, what each value stands for, or how the researcher was
+    supposed to code the field — all of it declared in the template and, until
+    now, dropped at export time.
+
+    `CREATE`, not `MERGE`: both backends wipe the graph before syncing (see
+    `clear_database`), so a single instance is guaranteed by the mechanism that
+    already exists. A `MERGE` here would imply a uniqueness key this vertex does
+    not need.
+
+    `context is None` for hand-built payloads, which carry no project to
+    describe; writing nothing is the correct outcome, not an error.
+    """
+    if context is None:
+        return
+    tx.run(
+        """
+        CREATE (p:ProjectContext)
+        SET p = $props, p.last_updated = timestamp()
+    """,
+        props=asdict(context),
+    )
 
 
 def _sync_sources(tx: Any, sources: list[dict[str, Any]]) -> None:

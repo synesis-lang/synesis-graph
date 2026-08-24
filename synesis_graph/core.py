@@ -9,6 +9,7 @@ import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -227,6 +228,314 @@ def text_source_field_names(source_fields: Sequence[SourceFieldSpec | str]) -> l
 
 
 @dataclass
+class ProjectContextSpec:
+    """The project's own context, to be written into the graph as a vertex.
+
+    An exported graph is syntax without semantics: a consumer introspecting the
+    schema learns that a vertex `Aspect` has a property `name`, but not that
+    `Aspect` is Dooyeweerd's modal scale, that its values are *ordered*, or what
+    `[15] Fiducial` means. All of that is declared in the template and thrown
+    away at export time.
+
+    The point of this type is that **the context travels with the data, not with
+    the tool**. A client reading the template locally would solve it for itself
+    only; written to the graph, every consumer gets it — Claude Desktop, any MCP
+    client, or a human in the database's own studio.
+
+    The context is not stored as a vertex-per-field either. Exploding the template
+    into `Field`/`Value` vertices would pollute the research graph with metadata:
+    analytical queries would start bumping into nodes that are not corpus data.
+    This context is meant to be *read*, not traversed.
+
+    **It is written as Markdown, not JSON.** Measured against the face85 corpus
+    through the real MCP path: the serialized `field_specs` reached the model as
+    29k characters (~7.3k tokens) of raw JSON in which 53% of the keys were
+    `null` — a shape the model has to parse before it can read anything. The same
+    content as Markdown is 27% smaller and immediately legible, and it is the
+    template's own idiom: GUIDELINES are already written with headings and line
+    breaks, which JSON escaping destroys.
+    """
+
+    project_name: str
+    description: str
+    concept_label: str
+    template_name: str
+    # The template's semantics as a readable document: every field with its type,
+    # scope, description, value scale and GUIDELINES. This is the property a
+    # consumer injects into a prompt.
+    template_doc: str
+    # Provenance and shape of this snapshot, also as prose.
+    project_summary: str
+    compiler_version: str
+    synesis_graph_version: str
+    compiled_at: str
+    generated_at: str
+    source_count: int
+    item_count: int
+    concept_count: int
+
+
+def _utc_now_iso() -> str:
+    """Sync timestamp, UTC. Lets a consumer tell how old the snapshot is."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _synesis_graph_version() -> str:
+    """This package's version, for provenance.
+
+    Imported lazily: `synesis_graph/__init__.py` is the package root and importing
+    it from here at module level would cycle.
+    """
+    try:
+        from synesis_graph import __version__
+
+        return str(__version__)
+    except Exception:  # noqa: BLE001 - provenance is best-effort, never fatal
+        return ""
+
+
+def strip_locations(obj: Any) -> Any:
+    """Removes every `location` key, at any depth.
+
+    Locations are absolute paths from the machine that compiled the project
+    (`D:\\GitHub\\...`). They are useless to any consumer of the database and
+    unwelcome in a graph shared with a co-author.
+
+    **The recursion is the point.** `location` shows up at two levels — on the
+    field spec itself and inside each entry of its `values[]` — so a shallow
+    pass would leave most of the noise behind. Dropping them cuts the payload
+    by 17% to 35%, measured over two real projects.
+    """
+    if isinstance(obj, dict):
+        return {k: strip_locations(v) for k, v in obj.items() if k != "location"}
+    if isinstance(obj, list):
+        return [strip_locations(item) for item in obj]
+    return obj
+
+
+def _render_field_doc(name: str, spec: dict[str, Any]) -> list[str]:
+    """One field as Markdown: heading, prose, value scale, guidelines.
+
+    Keys whose value is `None` are skipped rather than rendered — over half the
+    keys in a real `field_specs` are null, and printing them would bury the
+    content that matters in placeholders.
+    """
+    kind = spec.get("type") or "?"
+    scope = spec.get("scope") or "?"
+    lines = [f"### `{name}` — {kind}, escopo {scope}"]
+
+    if spec.get("description"):
+        lines.append(str(spec["description"]).strip())
+
+    if spec.get("arity"):
+        lines.append(f"Multiplicidade: {spec['arity']}.")
+    if spec.get("format"):
+        lines.append(f"Formato: {spec['format']}.")
+
+    values = spec.get("values") or []
+    if values:
+        lines.append("Valores possíveis:")
+        for value in values:
+            index = value.get("index")
+            label = value.get("label") or ""
+            desc = (value.get("description") or "").strip()
+            prefix = f"- [{index}] {label}" if index is not None else f"- {label}"
+            lines.append(f"{prefix}: {desc}" if desc else prefix)
+
+    relations = spec.get("relations") or {}
+    if relations:
+        lines.append("Relações admitidas:")
+        lines.extend(f"- {rel}: {desc}" for rel, desc in relations.items())
+
+    if spec.get("identifies"):
+        lines.append(f"IDENTIFIES: {spec['identifies']}.")
+    if spec.get("refers_to"):
+        lines.append(f"REFERS TO: {spec['refers_to']}.")
+
+    if spec.get("guidelines"):
+        # The researcher's coding protocol, verbatim. It is already written as
+        # prose with headings and line breaks — JSON escaping used to destroy
+        # exactly that shape.
+        lines.append("Orientações de codificação:")
+        lines.append(str(spec["guidelines"]).strip())
+
+    lines.append("")
+    return lines
+
+
+def _render_navigation_doc(concept_label: str, graph_fields: list[str]) -> list[str]:
+    """The edges, with their direction, so a consumer need not guess the topology.
+
+    Without this the document says `aspect` is a taxonomy but never says which
+    edge reaches it. Verified through the real MCP path against face85: guessing
+    `MAPPED_TO_ASPECT` (a stale type still present in the schema, with zero
+    edges) instead of `QUALIFIED_BY` returned **zero rows and no error** — the
+    silent failure mode that makes a model keep probing, or worse, conclude the
+    data is absent.
+
+    Derived from `TAXONOMY_RELATION_MAP`, the same table the backends use when
+    writing, so the document cannot drift from the graph.
+    """
+    from synesis_graph.backends.neo4j import _get_taxonomy_relation
+
+    lines = [
+        "## Como navegar o grafo",
+        "",
+        "Arestas, com a direção que importa — a seta invertida devolve zero linhas sem erro:",
+        "- `(Item)-[:FROM_SOURCE]->(Source)` — de qual referência o trecho veio",
+        f"- `(Item)-[:MENTIONS]->({concept_label})` — quais conceitos o trecho menciona",
+        f"- `({concept_label})-[:RELATES_TO]->({concept_label})` — relação entre conceitos",
+    ]
+    # Labels come from `get_taxonomy_labels`, the same function the backends call
+    # when declaring the types — deriving them again here would be a second
+    # source of truth waiting to disagree.
+    for field_name, label in zip(graph_fields, get_taxonomy_labels(graph_fields), strict=True):
+        relation = _get_taxonomy_relation(field_name)
+        lines.append(f"- `({concept_label})-[:{relation}]->({label})`")
+
+    lines += [
+        "",
+        "Das referências de um conceito:",
+        f"`MATCH (c:{concept_label})<-[:MENTIONS]-(i:Item)-[:FROM_SOURCE]->(s:Source)`",
+        "",
+        "Nomes de conceito são snake_case e minúsculos; para busca aproximada use "
+        "`CONTAINS`, não igualdade.",
+        "",
+    ]
+    return lines
+
+
+def _render_template_doc(
+    template: dict[str, Any], concept_label: str, graph_fields: list[str]
+) -> str:
+    """The template as a document a model can read straight into a prompt."""
+    specs = strip_locations(template.get("field_specs") or {})
+    rules = {
+        "obrigatórios": template.get("required_fields") or {},
+        "opcionais": template.get("optional_fields") or {},
+        "proibidos": template.get("forbidden_fields") or {},
+    }
+    bundles = template.get("bundled_fields") or {}
+
+    lines: list[str] = [f"# Template `{template.get('name') or '(sem nome)'}`", ""]
+    lines.append(f"Os conceitos deste projeto são vértices `{concept_label}`.")
+    taxonomies = get_taxonomy_labels(graph_fields)
+    if taxonomies:
+        lines.append("Taxonomias: " + ", ".join(f"`{t}`" for t in taxonomies) + ".")
+    lines.append("")
+
+    lines.append("## Regras de preenchimento")
+    for scope in ("SOURCE", "ITEM", "ONTOLOGY"):
+        parts = [
+            f"{kind} {', '.join(f'`{f}`' for f in (by_scope.get(scope) or []))}"
+            for kind, by_scope in rules.items()
+            if by_scope.get(scope)
+        ]
+        for bundle in bundles.get(scope) or []:
+            parts.append("em conjunto " + ", ".join(f"`{f}`" for f in bundle))
+        lines.append(f"- **{scope}**: " + ("; ".join(parts) if parts else "sem restrições"))
+    lines.append("")
+
+    lines.extend(_render_navigation_doc(concept_label, graph_fields))
+
+    lines.append("## Campos")
+    lines.append("")
+    for name, spec in specs.items():
+        if isinstance(spec, dict):
+            lines.extend(_render_field_doc(name, spec))
+
+    return "\n".join(lines).strip()
+
+
+def _render_project_summary(
+    project: dict[str, Any],
+    export_metadata: dict[str, Any],
+    counts: dict[str, int],
+    generated_at: str,
+) -> str:
+    """Provenance and shape of the snapshot, as prose rather than a JSON blob."""
+    lines = [f"# Projeto `{project.get('name') or '(sem nome)'}`", ""]
+
+    metadata = project.get("metadata") or {}
+    if metadata:
+        lines.append("## Metadados")
+        lines.extend(f"- {key}: {value}" for key, value in metadata.items())
+        lines.append("")
+
+    lines.append("## Conteúdo deste grafo")
+    lines.append(f"- {counts['source_count']} referências (`Source`)")
+    lines.append(f"- {counts['item_count']} trechos analisados (`Item`)")
+    lines.append(f"- {counts['concept_count']} conceitos")
+    lines.append("")
+
+    lines.append("## Proveniência")
+    lines.append(f"- compilado em {export_metadata.get('timestamp') or '(desconhecido)'}")
+    lines.append(f"- gravado no grafo em {generated_at}")
+    lines.append(
+        "Se o projeto mudou desde então, este contexto descreve o snapshot, não o estado atual."
+    )
+    return "\n".join(lines).strip()
+
+
+def build_project_context(
+    json_data: dict[str, Any],
+    concept_label: str,
+    graph_fields: list[str],
+    synesis_graph_version: str,
+    sources: Sequence[Any] = (),
+    items: Sequence[Any] = (),
+    concepts: Sequence[Any] = (),
+) -> ProjectContextSpec:
+    """Assembles the project context from the compiler's canonical JSON.
+
+    Nothing is extracted here that the compiler does not already emit: the JSON
+    carries `project.description` (the `.synp` DESCRIPTION block), the full
+    `template.field_specs` — with each field's GUIDELINES, VALUES, RELATIONS and
+    ARITY — the validation rules per scope, and an `export_metadata` block with
+    provenance.
+
+    The output is **Markdown**, not JSON. Verified through the real MCP path
+    against face85: as JSON the field specs reached the model as ~7.3k tokens
+    with 53% null keys; the same content rendered as prose is 27% smaller and
+    needs no parsing before it can be read.
+
+    `sources`/`items`/`concepts` are the payload's own rows, used only to count
+    what the sync will write — never the compiler's own counters, which count
+    different things under the same words (its `item_count` counts SOURCE blocks,
+    not the `Item` vertices the sync writes). They default to empty so a caller
+    that only wants the template semantics can omit them.
+    """
+    project = json_data.get("project") or {}
+    template = json_data.get("template") or {}
+    export_metadata = json_data.get("export_metadata") or {}
+
+    counts = {
+        "source_count": len(sources),
+        "item_count": len(items),
+        "concept_count": len(concepts),
+    }
+    generated_at = _utc_now_iso()
+
+    return ProjectContextSpec(
+        project_name=project.get("name") or "",
+        # A project without a DESCRIPTION block yields None here; an empty string
+        # keeps the property a string for every consumer.
+        description=(project.get("description") or "").strip(),
+        concept_label=concept_label,
+        template_name=template.get("name") or "",
+        template_doc=_render_template_doc(template, concept_label, graph_fields),
+        project_summary=_render_project_summary(project, export_metadata, counts, generated_at),
+        compiler_version=str(export_metadata.get("compiler_version") or ""),
+        synesis_graph_version=synesis_graph_version,
+        compiled_at=str(export_metadata.get("timestamp") or ""),
+        generated_at=generated_at,
+        source_count=counts["source_count"],
+        item_count=counts["item_count"],
+        concept_count=counts["concept_count"],
+    )
+
+
+@dataclass
 class GraphPayload:
     """Payload prepared for Neo4j synchronization."""
 
@@ -265,6 +574,11 @@ class GraphPayload:
     # not), and no other consumer can reconstruct it from the split.
     # Empty for hand-built payloads, which simply have no fields to validate.
     field_specs: dict[str, Any] = field(default_factory=dict)
+    # The project's own context (template semantics + .synp DESCRIPTION), written
+    # to the graph as a `ProjectContext` vertex so consumers do not have to read
+    # the project's source files. Defaults to None: hand-built payloads carry no
+    # context, and the backends skip the write when it is absent.
+    project_context: ProjectContextSpec | None = None
 
 
 @dataclass
@@ -615,6 +929,15 @@ def _build_graph_payload(
         item_fields=item_fields,
         taxonomy_edges=taxonomy_edges,
         field_specs=json_data.get("template", {}).get("field_specs", {}),
+        project_context=build_project_context(
+            json_data,
+            concept_label=concept_label,
+            graph_fields=graph_fields,
+            synesis_graph_version=_synesis_graph_version(),
+            sources=sources,
+            items=items,
+            concepts=concepts,
+        ),
     )
 
 
@@ -629,6 +952,7 @@ def _qualify_payload(payload: GraphPayload, alias: str) -> GraphPayload:
 
     Mutates and returns the payload (it is freshly built per member).
     """
+
     def q_bib(ref: str) -> str:
         raw = ref if str(ref).startswith("@") else f"@{ref}"
         return f"{alias}:{raw}"
@@ -728,9 +1052,7 @@ def merge_payloads(
             base.value_maps.setdefault(k, v)
 
     # Resolve the linkage over the members' JSON exports.
-    link = resolve_linkage([
-        {"alias": alias, "json_data": data} for alias, _p, data in members
-    ])
+    link = resolve_linkage([{"alias": alias, "json_data": data} for alias, _p, data in members])
 
     for entity, first, dup in link.duplicate_owners:
         reporter.warning(
@@ -746,8 +1068,7 @@ def merge_payloads(
     if n_nodes or n_edges:
         entities_seen = ", ".join(sorted(link.owners)) or "none"
         reporter.info(
-            f"{n_nodes} identity node(s) and {n_edges} REFERS_TO edge(s) resolved "
-            f"[{entities_seen}]"
+            f"{n_nodes} identity node(s) and {n_edges} REFERS_TO edge(s) resolved [{entities_seen}]"
         )
     if link.orphans:
         reporter.warning(
@@ -996,11 +1317,16 @@ def _extract_corpus_data(
     # We skip them by name, derived from the template (scalar_fields + graph_fields), which
     # generalizes to any project instead of the previous hardcoded lattes-specific names.
     _structural_skip = {
-        "chain", *chain_field_names, *code_field_names,
-        memo_field_name, quotation_field_name,
+        "chain",
+        *chain_field_names,
+        *code_field_names,
+        memo_field_name,
+        quotation_field_name,
         *ontology_field_names,
         # common citation aliases
-        "text", "citation", "citação",
+        "text",
+        "citation",
+        "citação",
     }
 
     for corpus_item in corpus:
@@ -1065,9 +1391,7 @@ def _extract_corpus_data(
                 for code in block_codes:
                     code = code.strip() if isinstance(code, str) else code
                     if code:
-                        mentions.append(
-                            {"item_id": item_id, "concept": code, "mention_order": 0}
-                        )
+                        mentions.append({"item_id": item_id, "concept": code, "mention_order": 0})
 
                 # v3.0: chains como {from, relation, to}
                 src = chain.get("from", "").strip()

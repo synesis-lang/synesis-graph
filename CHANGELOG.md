@@ -13,6 +13,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-23
+
+### Added — the exported graph now describes itself (`ProjectContext`)
+
+Every sync to a database backend writes a single `ProjectContext` vertex holding
+the project's own context. **The context travels with the data, not with the
+tool**: any consumer of the graph gets it — Claude Desktop, any MCP client, the
+database's own studio, or a colleague who receives a copy.
+
+The problem it solves: an exported graph was *syntax without semantics*. A
+consumer introspecting the schema learned that a vertex `Aspect` has a property
+`name`, but not that `Aspect` is Dooyeweerd's modal scale, that its values are
+**ordered**, or what `[15] Fiducial` means. All of that is declared in the
+template and used to be discarded at export time.
+
+Properties written:
+
+| Property | Content |
+|---|---|
+| `description` | the `.synp` `DESCRIPTION` block, verbatim |
+| `project_summary` | metadata, corpus size and provenance, as prose |
+| `template_doc` | the template as a readable document: every field with type, scope, description, value scale and **GUIDELINES**, plus the validation rules and a **`## Como navegar o grafo`** section naming every edge with its direction |
+| `concept_label`, `template_name`, `project_name` | identifiers |
+| `source_count`, `item_count`, `concept_count` | integers, queryable without parsing |
+| `compiler_version`, `synesis_graph_version`, `compiled_at`, `generated_at` | provenance |
+
+Nothing new is extracted from the compiler: the canonical JSON already carried
+all of it. `prepare_payload` read the `project` object only to take its name.
+
+**Written as Markdown, not JSON.** Measured through the real MCP path against a
+210-concept corpus: as JSON the field specs reached the model as ~7.3k tokens in
+which **53% of the keys were `null`**, with the GUIDELINES — written by the
+researcher with headings and line breaks — escaped inside a string. The same
+content as prose is smaller, needs no parsing, and keeps the shape the
+researcher gave it.
+
+`GUIDELINES` are the highest-value part: they are the **coding protocol**, with
+explicit decision rules and examples ("do not include proper names", "1–3
+sentences"). They answer what no schema can — *why* a datum looks the way it
+does, and what counts as a valid instance of a field. Until now they lived only
+in the `.synt` and left no trace in the graph.
+
+- **Backends:** ArcadeDB (TCP/HTTP) and Neo4j. The HTML backend is deliberately
+  out of scope — it is a visualisation artifact with no programmatic consumer,
+  and the context is already implicit on screen for a human reader.
+- **Counts are measured from what reaches the graph**, never copied from the
+  compiler's `export_metadata`: its counters answer a different question (its
+  `item_count` counts SOURCE blocks, not the `Item` vertices the sync writes),
+  so storing them would produce a property that looks checkable against the
+  graph and silently disagrees with it.
+- **`location` keys are stripped recursively.** They are absolute paths from the
+  machine that compiled the project, useless to any consumer and unwelcome in a
+  shared graph. They appear at two levels — on the field spec and inside each
+  `values[]` entry — so a shallow pass would leave most of them behind.
+- **A single instance is guaranteed** by the clearing both backends already do
+  before syncing; no upsert logic was needed.
+- **ArcadeDB declares the context's text properties** even though none is
+  indexed. Every other type here declares only what an index needs, but a type
+  with no declared properties shows up in schema introspection as an empty
+  vertex — so an MCP client had no way to learn the context was there.
+
+### Fixed — a missing `[neo4j]` section reported a nonsensical error
+
+- Running the Neo4j backend against a config written for another backend failed
+  with `Required field missing in [neo4j]: 'neo4j'` — a field inside a section
+  that does not exist. The whole-section case is now handled apart from the
+  missing-field one, and the message names the sections the file does have.
+- A missing `uri` was rendered with doubled quotes (`"'uri'"`).
+
+
 ### Added — contract tests for `ORDERED` values from the compiler
 
 - **No code change was needed**, but the guarantee is now pinned by tests. Since

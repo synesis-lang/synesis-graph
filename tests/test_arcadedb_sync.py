@@ -22,7 +22,7 @@ from synesis_graph.backends.arcadedb import (
     clear_database,
     sync_to_arcadedb,
 )
-from synesis_graph.core import SyncError
+from synesis_graph.core import SyncError, build_project_context
 
 
 class FakeClient:
@@ -116,9 +116,7 @@ class TestCreateSchema:
         for statement in client.sql():
             assert "IF NOT EXISTS" in statement
 
-    def test_graph_fields_are_not_declared_as_concept_properties(
-        self, client, payload_factory
-    ):
+    def test_graph_fields_are_not_declared_as_concept_properties(self, client, payload_factory):
         """TOPIC/ORDERED become their own nodes; indexing them as prose would
         dilute the index."""
         payload = payload_factory(graph_fields=["topic"], scalar_fields=[])
@@ -263,9 +261,7 @@ class TestSyncToArcadeDB:
     def test_schema_is_created_before_the_transaction(self, client, minimal_payload):
         """DDL inside the write transaction would be a different failure mode."""
         sync_to_arcadedb(client, minimal_payload)
-        first_merge = next(
-            i for i, (_, s, _) in enumerate(client.statements) if "MERGE" in s
-        )
+        first_merge = next(i for i, (_, s, _) in enumerate(client.statements) if "MERGE" in s)
         schema_positions = [
             i for i, (_, s, _) in enumerate(client.statements) if "CREATE PROPERTY" in s
         ]
@@ -385,9 +381,7 @@ def test_integration_undeclared_property_cannot_be_indexed(live_db):
     live_db.command("MERGE (c:Undeclared {name: 'x'})")
 
     with pytest.raises(ArcadeDBError) as excinfo:
-        live_db.command(
-            "CREATE INDEX ON Undeclared (name) FULL_TEXT", language="sql"
-        )
+        live_db.command("CREATE INDEX ON Undeclared (name) FULL_TEXT", language="sql")
 
     assert "does not exist" in str(excinfo.value)
 
@@ -400,3 +394,58 @@ def test_integration_resync_is_idempotent(live_db, minimal_payload):
 
     concepts = live_db.query("MATCH (c:Concept) RETURN count(c) AS n")[0]["n"]
     assert concepts == len(minimal_payload.concepts)
+
+
+# ---------------------------------------------------------------------------
+# ProjectContext — the vertex that makes the exported graph self-describing
+# ---------------------------------------------------------------------------
+class TestProjectContext:
+    """What is specific to ArcadeDB here: the type must be declared up front.
+
+    The write itself is shared with the Neo4j backend (`_sync_project_context`)
+    and covered in `test_project_context.py`; what ArcadeDB adds is that Cypher
+    will not create the vertex type implicitly, so `_create_schema` has to.
+    """
+
+    def test_declares_the_vertex_type(self, client, minimal_payload):
+        _create_schema(client, minimal_payload)
+        assert client.sql_matching("CREATE VERTEX TYPE ProjectContext")
+
+    def test_declares_the_type_even_without_a_context(self, client, empty_payload):
+        # Declaring costs nothing, and an empty type reads better to whoever
+        # inspects the schema than a type that sometimes exists.
+        _create_schema(client, empty_payload)
+        assert client.sql_matching("CREATE VERTEX TYPE ProjectContext")
+
+    def test_declares_its_text_properties(self, client, minimal_payload):
+        """Unlike every other type here, these are declared without being indexed.
+
+        A type with no declared properties appears in `get_schema` as an empty
+        vertex, so an MCP client introspecting the graph cannot tell there is a
+        context to read. Observed against face85 before this was added.
+        """
+        _create_schema(client, minimal_payload)
+        assert client.sql_matching("CREATE PROPERTY ProjectContext.template_doc")
+        assert client.sql_matching("CREATE PROPERTY ProjectContext.description")
+
+    def test_does_not_declare_the_integer_counts(self, client, minimal_payload):
+        # `_declare_property` emits STRING; the counts are integers.
+        _create_schema(client, minimal_payload)
+        assert not client.sql_matching("CREATE PROPERTY ProjectContext.item_count")
+
+    def test_context_is_written_inside_the_transaction(self, client, payload_factory):
+        payload = payload_factory()
+        payload.project_context = build_project_context(
+            {"project": {"name": "p", "description": "D"}},
+            concept_label="Concept",
+            graph_fields=[],
+            synesis_graph_version="0.1",
+        )
+        sync_to_arcadedb(client, payload)
+        written = [i for i, s in enumerate(client.cypher()) if "ProjectContext" in s]
+        assert written, "the context was never written"
+        assert client.transactions == ["begin", "commit"]
+
+    def test_payload_without_context_writes_none(self, client, minimal_payload):
+        sync_to_arcadedb(client, minimal_payload)
+        assert not [s for s in client.cypher() if "ProjectContext" in s]

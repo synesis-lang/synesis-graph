@@ -95,14 +95,49 @@ class HTMLConfig:
 PipelineConfig = Neo4jConfig | ArcadeDBConfig | HTMLConfig
 
 
+def _describe_available_sections(parsed_cfg: dict[str, Any]) -> str:
+    """Lists the sections the file does have, to orient whoever misconfigured it."""
+    sections = [f"[{name}]" for name, value in parsed_cfg.items() if isinstance(value, dict)]
+    return ", ".join(sections) if sections else "none"
+
+
 def _load_neo4j_config(parsed_cfg: dict[str, Any]) -> Neo4jConfig | ConnectionError:
-    """Loads and validates Neo4j configuration block."""
+    """Loads and validates the [neo4j] configuration block.
+
+    The missing-section case is handled apart from the missing-field one. Folding
+    them together used to produce a nonsensical message: `parsed_cfg["neo4j"]`
+    raises `KeyError('neo4j')` when the whole section is absent, which the field
+    handler then rendered as "Required field missing in [neo4j]: 'neo4j'" —
+    pointing at a field inside a section that does not exist. Observed against a
+    project configured for ArcadeDB only.
+    """
     try:
         cfg = parsed_cfg["neo4j"]
+    except KeyError:
+        return ConnectionError(
+            message="Incomplete configuration",
+            stage="config",
+            details=(
+                "Missing [neo4j] section in the configuration file. "
+                f"Sections found: {_describe_available_sections(parsed_cfg)}. "
+                "Add the section, or run the backend the file is configured for."
+            ),
+        )
+
+    if not isinstance(cfg, dict):
+        return ConnectionError(
+            message="Error reading Neo4j configuration",
+            stage="config",
+            details="[neo4j] must be a table.",
+        )
+
+    try:
         # Accept both 'uri' and 'URI'
         uri = cfg.get("uri") or cfg.get("URI")
         if not uri:
-            raise KeyError("'uri'")
+            # Bare name: `KeyError` adds its own quotes when rendered, so quoting
+            # here too produced a doubled `"'uri'"` in the message.
+            raise KeyError("uri")
         return Neo4jConfig(
             uri=uri,
             user=cfg["user"],

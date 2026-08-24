@@ -37,6 +37,7 @@ todos os tipos de relação). Diferem no escopo das métricas avançadas — vej
 * **Métricas Automáticas:** Calcula métricas de rede em dois níveis:
     * **Métricas Nativas:** Sempre disponíveis via Cypher puro.
     * **Métricas GDS:** Algoritmos avançados quando o plugin Graph Data Science está instalado.
+* **Grafos que se descrevem:** Todo sync grava um vértice `ProjectContext` com a semântica do seu template — descrições de campo, escalas de valores e **GUIDELINES** — para que qualquer consumidor do grafo, do Claude Desktop a qualquer cliente MCP, saiba o que os dados *significam*.
 * **Rastreabilidade Total:** Cada nó e aresta mantém metadados de origem (`source_file`, `line`, `column`), garantindo auditabilidade científica.
 
 ---
@@ -94,6 +95,71 @@ END FIELD
 ```
 (:Item)-[:MENTIONS]->(:Categoria)-[:GROUPED_BY]->(:Tema)
 ```
+
+---
+
+## Grafos que se descrevem: `ProjectContext`
+
+Todo sync para um backend de banco grava um vértice `ProjectContext` com o
+contexto do próprio projeto. **O contexto viaja com os dados, não com a
+ferramenta.**
+
+Sem ele, o grafo exportado é *sintaxe sem semântica*. Um consumidor que faça
+introspecção do schema descobre que o vértice `Aspect` tem uma propriedade
+`name` — mas não que `Aspect` é a escala modal de Dooyeweerd, que seus valores
+são **ordenados**, nem o que significa `[15] Fiducial`. Tudo isso está declarado
+no seu template, e era descartado na exportação.
+
+### O que ele guarda
+
+| Propriedade | Conteúdo |
+|---|---|
+| `description` | o bloco `DESCRIPTION` do seu `.synp`, literal |
+| `project_summary` | metadados, tamanho do corpus e proveniência, em prosa |
+| `template_doc` | o template como documento legível — cada campo com tipo, escopo, descrição, escala de valores e **GUIDELINES**, mais as regras de preenchimento e uma seção `## Como navegar o grafo` que nomeia cada aresta com sua direção |
+| `source_count`, `item_count`, `concept_count` | inteiros, consultáveis sem parse |
+| `compiler_version`, `synesis_graph_version`, `compiled_at`, `generated_at` | proveniência |
+
+### Por que isso importa
+
+**Responde perguntas que nenhum schema responde.** As `GUIDELINES` que você
+escreveu para cada campo são o seu **protocolo de codificação** — as regras de
+decisão e os exemplos que dizem o que conta como instância válida de um campo. Um
+assistente que as lê deixa de inferir seu critério a partir dos dados e passa a
+*conhecê-lo*.
+
+**É derivado, nunca fixado em código.** Dois projetos com templates diferentes
+produzem documentos diferentes: um pode ter `aspect` numa escala filosófica de 16
+valores, outro `categoria_resultado` com vocabulário próprio. Nada aqui presume
+as palavras de um projeto.
+
+**Não diverge em silêncio.** Ambos os backends limpam o grafo antes de
+sincronizar, então o contexto descreve sempre *aquele* snapshot. O
+`generated_at` permite ao consumidor dizer "este grafo tem três meses" em vez de
+apresentar dado velho como atual.
+
+**É Markdown, não JSON.** Medido por um cliente MCP real: como JSON, as
+especificações de campo chegavam com ~7,3 mil tokens e 53% das chaves valendo
+`null`, e as GUIDELINES — que você escreveu com títulos e quebras de linha — vinham
+escapadas dentro de uma string. Prosa é menor, dispensa parse e preserva a forma
+que você deu.
+
+### Como ler
+
+```cypher
+// Orientação barata: do que trata este grafo, e qual seu tamanho?
+MATCH (p:ProjectContext) RETURN p.description, p.project_summary
+
+// A semântica completa do template, quando a pergunta exigir
+MATCH (p:ProjectContext) RETURN p.template_doc
+```
+
+Backends: **ArcadeDB** e **Neo4j**. O backend HTML fica de fora — é artefato de
+visualização, sem consumidor programático, e para quem lê na tela o contexto já
+está implícito.
+
+Um grafo gerado por versão anterior simplesmente não tem esse vértice; o
+consumidor deve tratar a ausência como "sem contexto disponível", não como erro.
 
 ---
 

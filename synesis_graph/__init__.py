@@ -8,7 +8,10 @@ from pathlib import Path
 try:
     __version__ = _pkg_version("synesis-graph")
 except PackageNotFoundError:
-    __version__ = "0.2.1"
+    # Fallback for a source tree that was never installed. Kept in step with
+    # pyproject: it is written into every graph as `ProjectContext.
+    # synesis_graph_version`, so a stale value here would misreport provenance.
+    __version__ = "0.8.0"
 
 # synesis2graph.py lives at the repo root — make it importable from anywhere.
 _repo_root = Path(__file__).parent.parent
