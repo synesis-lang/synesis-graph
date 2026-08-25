@@ -37,6 +37,7 @@ from synesis_graph.core import (
     DEFAULT_ARCADEDB_ANALYZER,
     GraphPayload,
     SyncError,
+    declare_fulltext_capability,
     get_taxonomy_labels,
     resolve_arcadedb_analyzer,
     text_source_field_names,
@@ -54,12 +55,53 @@ SOURCE_TEXT_PROPS = ("title", "abstract")
 # Declared so schema introspection announces the context instead of showing an
 # empty vertex type. Only the STRING-typed ones: the counts are integers and
 # ArcadeDB would reject them under a STRING declaration.
+# Tipos aceitos em `CREATE PROPERTY`, verificados contra o ArcadeDB 26.7.3.
+_DECLARABLE_TYPES = frozenset({"STRING", "DOUBLE", "FLOAT", "INTEGER", "LONG", "DECIMAL"})
+
+# Métricas de rede calculadas por `compute_backend_metrics` e gravadas em cada
+# conceito. Declaradas para que apareçam na introspecção: um cliente MCP descobre
+# o grafo por `get_schema`, e uma propriedade não declarada é invisível ali —
+# mesmo estando gravada.
+#
+# Observado ao vivo (2026-08-24): perguntado pelos conceitos "mais centrais", o
+# modelo contou arestas à mão e devolveu um ranking de grau, porque não tinha
+# como saber que `pagerank` já estava no banco. Os dois rankings divergem.
+CONCEPT_METRIC_PROPS = (
+    ("pagerank", "DOUBLE"),
+    ("betweenness", "DOUBLE"),
+    ("degree", "INTEGER"),
+    ("in_degree", "INTEGER"),
+    ("out_degree", "INTEGER"),
+    ("community", "INTEGER"),
+    ("mention_count", "INTEGER"),
+    ("source_count", "INTEGER"),
+)
+
 PROJECT_CONTEXT_TEXT_PROPS = (
     "project_name",
     "description",
     "template_doc",
     "project_summary",
     "concept_label",
+    # Which fields the graph can be searched by meaning, and with which model.
+    # `embedding_dimensions` is an integer and stays out, like the counts: this
+    # loop declares STRING. The typed helper makes declaring them possible, but
+    # doing it belongs with the rest of the semantic-capability contract.
+    "embedding_fields",
+    "embedding_model",
+    # Which fields it can be searched by WORD, and under which analyzer. The
+    # consumer needs the exact field list because `SEARCH_INDEX` addresses a
+    # composite index by it — `Concept[search_name, ontology_description]`.
+    "fulltext_concept_fields",
+    "fulltext_item_fields",
+    "fulltext_source_fields",
+    "fulltext_analyzer",
+    # Which backend computed the network metrics, and over which projection —
+    # ArcadeDB's `algo.*` accepts no scope filter and runs over the whole graph.
+    # Without this, a consumer ranking by PageRank cannot tell that the score
+    # includes edges to Items, Sources and taxonomy nodes.
+    "metrics_backend",
+    "metrics_scope",
 )
 
 
@@ -100,6 +142,11 @@ def sync_to_arcadedb(
         _create_schema(client, payload)
         _create_constraints(client, payload)
         _create_search_indexes(client, payload, fulltext_analyzer)
+        # Declared right after the indexes are built, and from the same field
+        # lists — so what the context announces cannot drift from what exists.
+        # Before `_execute_sync_transaction`, which is what writes the context
+        # vertex; declaring after it would announce nothing.
+        _declare_fulltext(payload, fulltext_analyzer)
         _execute_sync_transaction(client, payload)
         if embeddings is not None:
             error = _sync_embeddings(client, payload, embeddings)
@@ -131,11 +178,32 @@ def _source_index_props(payload: GraphPayload) -> list[str]:
     return [p for p in [*SOURCE_TEXT_PROPS, *text_fields] if validate_cypher_label(p)]
 
 
-def _declare_property(client: ArcadeDBClient, type_name: str, prop: str) -> None:
-    """Declares one STRING property, if the name is safe to interpolate."""
+def _declare_property(
+    client: ArcadeDBClient, type_name: str, prop: str, declared_type: str = "STRING"
+) -> None:
+    """Declares one property, if the name is safe to interpolate.
+
+    `declared_type` defaults to STRING because that is what every caller needed
+    until the network metrics arrived: `pagerank` is a DOUBLE and `degree` an
+    INTEGER, and declaring either as STRING makes ArcadeDB reject the value at
+    sync time — the same trap that keeps the `ProjectContext` counts undeclared.
+
+    Verified against ArcadeDB 26.7.3: DOUBLE, FLOAT, INTEGER, LONG and DECIMAL
+    are all accepted, and values round-trip unchanged.
+
+    The type is whitelisted rather than interpolated freely: it reaches an SQL
+    string, and the property name is already guarded by `validate_cypher_label`.
+    """
     if not validate_cypher_label(type_name) or not validate_cypher_label(prop):
         return
-    client.command(f"CREATE PROPERTY {type_name}.{prop} IF NOT EXISTS STRING", language="sql")
+    if declared_type not in _DECLARABLE_TYPES:
+        logger.warning(
+            "Ignoring unknown property type %r for %s.%s", declared_type, type_name, prop
+        )
+        return
+    client.command(
+        f"CREATE PROPERTY {type_name}.{prop} IF NOT EXISTS {declared_type}", language="sql"
+    )
 
 
 def _create_schema(client: ArcadeDBClient, payload: GraphPayload) -> None:
@@ -188,6 +256,30 @@ def _create_schema(client: ArcadeDBClient, payload: GraphPayload) -> None:
     # Properties backing the uniqueness indexes.
     _declare_property(client, "Source", "bibtex")
     _declare_property(client, "Item", "item_id")
+
+    # Audit trail back to the `.syn`. Declared so `get_schema` announces it: an
+    # undeclared property is invisible to MCP introspection, which is how the chat
+    # discovers the graph — the same trap `ProjectContext` fell into.
+    #
+    # `source_line` is declared INTEGER. It used to stay schema-less because
+    # `_declare_property` only wrote STRING, which ArcadeDB rejects for an integer;
+    # the typed helper removed that limitation, and leaving the property undeclared
+    # kept it invisible to the introspection the chat relies on.
+    _declare_property(client, "Item", "source_file")
+    _declare_property(client, "Item", "source_line", "INTEGER")
+
+    # Identity of the annotated BLOCK, shared by every Item it produced. This is what
+    # makes the counting units distinguishable in a query: `count(i)` counts analytical
+    # items, `count(DISTINCT i.annotation_id)` counts annotated excerpts. Without it
+    # the chat could only guess the excerpt count by grouping on file and line.
+    _declare_property(client, "Item", "annotation_id")
+
+    # Métricas de rede do conceito. Declaradas com o tipo REAL — STRING faria o
+    # servidor recusar o valor no sync. Só no rótulo de conceito: as taxonomias
+    # não recebem métricas.
+    if validate_cypher_label(concept_label):
+        for prop, declared_type in CONCEPT_METRIC_PROPS:
+            _declare_property(client, concept_label, prop, declared_type)
     if validate_cypher_label(concept_label):
         _declare_property(client, concept_label, "name")
     for label in get_taxonomy_labels(payload.graph_fields):
@@ -259,6 +351,30 @@ def _create_search_indexes(
     source_props = _source_index_props(payload)
     if source_props:
         _create_fulltext_index(client, "Source", source_props, analyzer)
+
+
+def _declare_fulltext(payload: GraphPayload, fulltext_analyzer: str) -> None:
+    """Tells the ProjectContext which full-text indexes this sync created.
+
+    Only ArcadeDB declares this. Neo4j builds full-text indexes too, but they are
+    queried through `db.index.fulltext.queryNodes`, not `SEARCH_INDEX` — announcing
+    one backend's syntax for the other's graph would teach a query that always
+    fails.
+
+    The field lists come from the same helpers that fed `CREATE INDEX`, never
+    recomputed: a second derivation of the same rule is free to disagree with the
+    first, and the whole point of declaring is that the consumer can trust it.
+    """
+    concept_props = (
+        _concept_index_props(payload) if validate_cypher_label(payload.concept_label) else []
+    )
+    declare_fulltext_capability(
+        payload.project_context,
+        concept_props,
+        list(ITEM_TEXT_PROPS),
+        _source_index_props(payload),
+        resolve_arcadedb_analyzer(fulltext_analyzer),
+    )
 
 
 def _create_fulltext_index(

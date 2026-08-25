@@ -22,7 +22,7 @@ from synesis_graph.backends.arcadedb import (
     clear_database,
     sync_to_arcadedb,
 )
-from synesis_graph.core import SyncError, build_project_context
+from synesis_graph.core import ProjectContextSpec, SyncError, build_project_context
 
 
 class FakeClient:
@@ -104,6 +104,37 @@ class TestCreateSchema:
         _create_schema(client, minimal_payload)
         assert client.sql_matching("CREATE PROPERTY Item.citation")
         assert client.sql_matching("CREATE PROPERTY Item.description")
+
+    def test_declares_item_source_file(self, client, minimal_payload):
+        """Undeclared properties are invisible to MCP introspection.
+
+        The chat discovers the graph through `get_schema`; an Item whose audit trail
+        is not declared would not announce that the trail exists at all — the trap
+        `ProjectContext` already fell into.
+        """
+        _create_schema(client, minimal_payload)
+        assert client.sql_matching("CREATE PROPERTY Item.source_file")
+
+    def test_declares_item_source_line_as_integer(self, client, minimal_payload):
+        """`source_line` is declared INTEGER, not left schema-less.
+
+        It used to be omitted because `_declare_property` only wrote STRING, which
+        ArcadeDB rejects for an integer. The typed helper removed that limitation, and
+        an undeclared property is invisible to `get_schema` — which is how the chat
+        discovers what the graph offers.
+        """
+        _create_schema(client, minimal_payload)
+        assert client.sql_matching("CREATE PROPERTY Item.source_line IF NOT EXISTS INTEGER")
+
+    def test_declares_item_annotation_id(self, client, minimal_payload):
+        """The block identity is what makes counting units distinguishable in a query.
+
+        `count(i)` counts analytical items; `count(DISTINCT i.annotation_id)` counts
+        annotated excerpts. Comparing one against the other is what made an audit
+        contradict a correct answer.
+        """
+        _create_schema(client, minimal_payload)
+        assert client.sql_matching("CREATE PROPERTY Item.annotation_id")
 
     def test_declares_template_scalar_fields(self, client, payload_factory):
         payload = payload_factory(scalar_fields=["ontology_description"])
@@ -433,6 +464,44 @@ class TestProjectContext:
         _create_schema(client, minimal_payload)
         assert not client.sql_matching("CREATE PROPERTY ProjectContext.item_count")
 
+    def test_declares_the_concept_network_metrics(self, client, minimal_payload):
+        """PageRank e companhia são calculados no sync e ficavam invisíveis.
+
+        Observado ao vivo: perguntado pelos conceitos mais centrais, um cliente
+        MCP contou arestas à mão porque `get_schema` não anunciava `pagerank` —
+        que já estava gravado. Os dois rankings divergem.
+        """
+        _create_schema(client, minimal_payload)
+        assert client.sql_matching("CREATE PROPERTY Concept.pagerank")
+        assert client.sql_matching("CREATE PROPERTY Concept.betweenness")
+        assert client.sql_matching("CREATE PROPERTY Concept.community")
+
+    def test_metrics_are_declared_with_numeric_types(self, client, minimal_payload):
+        """STRING faria o servidor recusar o valor no sync.
+
+        É a mesma armadilha que mantém as contagens do `ProjectContext` fora da
+        declaração; aqui ela é resolvida declarando o tipo real.
+        """
+        _create_schema(client, minimal_payload)
+        sql = client.sql()
+        assert any("Concept.pagerank IF NOT EXISTS DOUBLE" in s for s in sql)
+        assert any("Concept.degree IF NOT EXISTS INTEGER" in s for s in sql)
+
+    def test_declares_the_semantic_capability_properties(self, client, minimal_payload):
+        """Which fields the graph can be searched by meaning, and with which model.
+
+        Undeclared, they would be written but invisible to `get_schema` — and the
+        capability exists precisely so a client can discover it without guessing.
+        """
+        _create_schema(client, minimal_payload)
+        assert client.sql_matching("CREATE PROPERTY ProjectContext.embedding_fields")
+        assert client.sql_matching("CREATE PROPERTY ProjectContext.embedding_model")
+
+    def test_does_not_declare_the_embedding_dimensions(self, client, minimal_payload):
+        # Integer, like the counts.
+        _create_schema(client, minimal_payload)
+        assert not client.sql_matching("CREATE PROPERTY ProjectContext.embedding_dimensions")
+
     def test_context_is_written_inside_the_transaction(self, client, payload_factory):
         payload = payload_factory()
         payload.project_context = build_project_context(
@@ -449,3 +518,46 @@ class TestProjectContext:
     def test_payload_without_context_writes_none(self, client, minimal_payload):
         sync_to_arcadedb(client, minimal_payload)
         assert not [s for s in client.cypher() if "ProjectContext" in s]
+
+
+class TestFulltextDeclaration:
+    """The declared capability must not drift from the indexes actually built."""
+
+    def test_declaration_matches_the_indexes_created(self, client, payload_factory):
+        """Same field lists feed `CREATE INDEX` and the declaration.
+
+        Recomputing the rule in the declaration would be a second implementation,
+        free to disagree with the first — and the whole point of declaring is that
+        the consumer can trust it without introspecting.
+        """
+        payload = payload_factory(scalar_fields=["ontology_description"])
+        payload.project_context = ProjectContextSpec(
+            project_name="p",
+            description="",
+            concept_label=payload.concept_label,
+            template_name="t",
+            template_doc="",
+            project_summary="",
+            compiler_version="",
+            synesis_graph_version="",
+            compiled_at="",
+            generated_at="",
+            source_count=0,
+            item_count=0,
+            concept_count=0,
+        )
+
+        sync_to_arcadedb(client, payload, "brazilian")
+
+        context = payload.project_context
+        assert context.fulltext_concept_fields == "search_name,ontology_description"
+        # The very identifier `SEARCH_INDEX` expects.
+        assert client.sql_matching("CREATE INDEX", "search_name")
+        assert "brazilian" in context.fulltext_analyzer.lower()
+
+    def test_declares_the_context_properties(self, client, minimal_payload):
+        """Undeclared properties are invisible to `get_schema`, which is how the
+        chat discovers what the graph offers."""
+        _create_schema(client, minimal_payload)
+        assert client.sql_matching("CREATE PROPERTY ProjectContext.fulltext_concept_fields")
+        assert client.sql_matching("CREATE PROPERTY ProjectContext.fulltext_analyzer")

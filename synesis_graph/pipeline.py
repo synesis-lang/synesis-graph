@@ -35,9 +35,12 @@ from synesis_graph.core import (
     analyze_template,
     compile_project,
     compile_project_to_json,
+    declare_metrics_provenance,
+    declare_semantic_capability,
     load_json_project,
     merge_payloads,
 )
+from synesis_graph.metrics_arcadedb import SCOPE_NOTE as ARCADEDB_SCOPE_NOTE
 from synesis_graph.ui import TaskReporter
 
 logger = logging.getLogger("synesis2graph")
@@ -183,6 +186,10 @@ def _compile_and_link(
             source_fields=source_fields,
             memo_field_name=memo_field_name,
             quotation_field_name=quotation_field_name,
+            # Each member gets ITS OWN root, before `merge_payloads`: in a linked
+            # study the projects live in different directories, and there is no
+            # single root that is correct for all of them.
+            project_root=str(path.parent.resolve()).replace("\\", "/"),
         )
         members.append((alias, payload, json_data))
 
@@ -349,6 +356,31 @@ def run_pipeline(
             # rather than on the BackendAdapter contract every backend shares.
             if isinstance(adapter, ArcadeDBBackendAdapter):
                 adapter.embeddings = sidecar
+
+                # Declare the capability on the context, so a client learns from
+                # the graph itself which fields it can search by meaning — and
+                # that those results are approximate. Here and not in
+                # `build_project_context` because the sidecar only exists now.
+                declare_semantic_capability(
+                    payload.project_context,
+                    sidecar.fields,
+                    sidecar.model or "",
+                    sidecar.dimensions or 0,
+                )
+
+    # Metrics provenance, declared BEFORE the sync writes the context vertex.
+    #
+    # The metrics themselves are computed after the sync — but which backend runs
+    # them, and over what projection, is known now. It has to be declared here or
+    # it never reaches the graph, and without it a consumer ranking concepts by
+    # PageRank cannot tell that ArcadeDB's score includes edges to Items, Sources
+    # and taxonomy nodes.
+    if isinstance(adapter, ArcadeDBBackendAdapter):
+        declare_metrics_provenance(
+            payload.project_context, "arcadedb", "whole_graph", ARCADEDB_SCOPE_NOTE
+        )
+    else:
+        declare_metrics_provenance(payload.project_context, "neo4j", "concept_subgraph")
 
     # 4. Backend synchronization via adapter contract
     backend_error = execute_backend_pipeline(adapter, payload, reporter)

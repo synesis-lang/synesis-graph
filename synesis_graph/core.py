@@ -274,6 +274,53 @@ class ProjectContextSpec:
     item_count: int
     concept_count: int
 
+    # What the graph can answer semantically, declared rather than guessed.
+    #
+    # A client can see from `get_schema` that a vector index exists, but not
+    # WHICH FIELD produced the vectors — and that changes what proximity means:
+    # over `ontology_description` it is conceptual similarity, over `topic` it is
+    # thematic co-occurrence. A consumer that cannot tell them apart is
+    # interpreting distances it does not understand.
+    #
+    # Empty means no semantic search. Never inferred from the index: a stale
+    # index over a graph that was re-synced without vectors would announce a
+    # capability the data no longer has.
+    embedding_fields: str = ""
+    embedding_model: str = ""
+    embedding_dimensions: int = 0
+
+    # Lexical search capability — the full-text indexes this backend actually
+    # built, and the analyzer they were built with.
+    #
+    # The chat was working around, in natural language, a problem this layer
+    # already solves: it instructed the model to cut a search term before its
+    # first accented character, because `CONTAINS 'psicologicos'` misses
+    # `psicológicos`. `SEARCH_INDEX` with the `brazilian` analyzer finds it
+    # deterministically — but the consumer cannot use it without knowing that the
+    # index exists, over WHICH fields, and under which name: a composite index
+    # (`Concept[search_name, ontology_description]`) has to be addressed by its
+    # exact field list, so guessing is not an option.
+    #
+    # Declared, not inferred, for the same reason as the vector capability — and
+    # only by the backend that built the indexes. Neo4j has full-text too, but a
+    # different query form; announcing ArcadeDB's syntax for a Neo4j graph would
+    # teach a query that always fails.
+    fulltext_concept_fields: str = ""
+    fulltext_item_fields: str = ""
+    fulltext_source_fields: str = ""
+    fulltext_analyzer: str = ""
+
+    # Which backend computed the network metrics, and over which projection.
+    #
+    # This is not bookkeeping: it changes how the number must be read. ArcadeDB's
+    # `algo.*` procedures accept no scope filter and run over the WHOLE graph, so a
+    # concept's PageRank incorporates its edges to Items, Sources and taxonomy
+    # nodes; Neo4j's GDS projects only the concept subgraph. The two are not
+    # comparable, and a consumer ranking "most central concepts" has no way to know
+    # that from the score alone.
+    metrics_backend: str = ""
+    metrics_scope: str = ""
+
 
 def _utc_now_iso() -> str:
     """Sync timestamp, UTC. Lets a consumer tell how old the snapshot is."""
@@ -311,6 +358,80 @@ def strip_locations(obj: Any) -> Any:
     if isinstance(obj, list):
         return [strip_locations(item) for item in obj]
     return obj
+
+
+def project_root_from_includes(project: dict[str, Any], corpus: list[dict[str, Any]]) -> str:
+    """Infers the project root, to turn absolute traceability paths into relative ones.
+
+    The canonical JSON carries the same file twice, in two shapes: `project.includes[]`
+    lists it **relative** to the project (`annotations.syn`), while each corpus item's
+    `traceability.file` is **absolute** on the machine that compiled
+    (`D:\\GitHub\\...\\annotations.syn`). Verified against a real export, not assumed.
+
+    That redundancy is the whole trick: the root is the prefix that remains when the
+    relative include is stripped off the end of the absolute path. No extra field, no
+    guessing from the filesystem — and it works even when the graph is built on a
+    machine that no longer has the project.
+
+    Returns "" when the two shapes cannot be matched, and callers then keep the path
+    as it came. Degrading to an absolute path is a privacy wart (see
+    `strip_locations`), never a failure.
+    """
+    includes = project.get("includes") or []
+    relative_paths = [
+        str(entry.get("path") or "").replace("\\", "/")
+        for entry in includes
+        if isinstance(entry, dict) and entry.get("path")
+    ]
+    if not relative_paths:
+        return ""
+
+    for item in corpus:
+        absolute = str((item.get("traceability") or {}).get("file") or "").replace("\\", "/")
+        if not absolute:
+            continue
+        for relative in relative_paths:
+            # `endswith` and not a path join: the include may itself be nested
+            # (`data/annotations.syn`), and the suffix is what both shapes share.
+            if relative and absolute.endswith(relative):
+                return absolute[: -len(relative)].rstrip("/")
+    return ""
+
+
+def relative_source_file(absolute_path: str, project_root: str) -> str:
+    """The traceability path as stored on the Item node.
+
+    Relative to the project root, with forward slashes. Two reasons, and the second
+    is the one that decides the format:
+
+    - An absolute path leaks the directory layout of whoever exported the graph, to
+      everyone the graph is shared with — the same objection `strip_locations` raises.
+    - The VSCode chat resolves the anchor against the open workspace, so a path
+      relative to the project root is what actually clicks through to the `.syn`.
+
+    Normalising separators is not cosmetic: a graph exported on Windows is read by a
+    chat that may run anywhere, and `D:\\a\\b.syn` would not resolve there.
+    """
+    normalised = str(absolute_path or "").replace("\\", "/")
+    if not normalised:
+        return ""
+
+    root = str(project_root or "").replace("\\", "/").rstrip("/")
+    if root:
+        # Boundary check on path COMPONENTS, not on the raw prefix: `/proj-evil`
+        # starts with `/proj` as a string but is not inside it, and returning
+        # `-evil/x.syn` from that would be worse than returning nothing.
+        if normalised == root:
+            return ""
+        if normalised.startswith(root + "/"):
+            return normalised[len(root) + 1 :]
+
+    # Relativisation failed. **Omit rather than keep the absolute path.** Keeping
+    # it leaks the exporting machine's directory layout to everyone the graph is
+    # shared with, and the path does not resolve on the reader's machine anyway —
+    # so the anchor it produces is a link that cannot open. An absent
+    # `source_file` is honest; a wrong one promises verification and fails.
+    return ""
 
 
 def _render_field_doc(name: str, spec: dict[str, Any]) -> list[str]:
@@ -533,6 +654,171 @@ def build_project_context(
         item_count=counts["item_count"],
         concept_count=counts["concept_count"],
     )
+
+
+def declare_semantic_capability(
+    context: ProjectContextSpec | None,
+    fields: Sequence[str],
+    model: str,
+    dimensions: int,
+) -> None:
+    """Records on the context which fields the graph can be searched by meaning.
+
+    Called from the pipeline rather than from `build_project_context` because the
+    payload is assembled before the vectors are known — the sidecar is only
+    resolved at sync time, and only for ArcadeDB.
+
+    **Declared, not inferred.** Reading the capability back off the vector index
+    would announce semantic search for a graph re-synced without vectors: the
+    index survives, the data does not. Only an actual sidecar sets this.
+
+    Writes nothing when any part is missing. A half-declared capability is worse
+    than none — a consumer would query by a field composition that never existed.
+    """
+    if context is None or not fields or not model or dimensions <= 0:
+        return
+    context.embedding_fields = ",".join(str(f) for f in fields)
+    context.embedding_model = str(model)
+    context.embedding_dimensions = int(dimensions)
+
+    # Also stated in the prose block, because that is what an MCP client actually
+    # reads: `project_summary` reaches the model as text, while the scalar
+    # properties are only seen by a client that goes looking for them.
+    context.project_summary = (
+        f"{context.project_summary}\n\n"
+        "## Busca semântica\n"
+        f"- conceitos (`{context.concept_label}`) indexados por vetor a partir de: "
+        f"{', '.join(f'`{f}`' for f in fields)}\n"
+        f"- modelo `{model}`, {dimensions} dimensões\n"
+        "- proximidade vetorial é **aproximada**: aproxima por significado, não por "
+        "menção literal. Um resultado por proximidade é sugestão de leitura, não "
+        "afirmação do pesquisador — diga qual dos dois está apresentando."
+    ).strip()
+
+
+def declare_fulltext_capability(
+    context: ProjectContextSpec | None,
+    concept_fields: Sequence[str],
+    item_fields: Sequence[str],
+    source_fields: Sequence[str],
+    analyzer: str,
+) -> None:
+    """Records which full-text indexes this graph carries, and under which analyzer.
+
+    Called from the ArcadeDB backend with the very field lists it passed to
+    `CREATE INDEX`, so the declaration cannot drift from what was built. Deriving
+    it again here would be a second implementation of the same rule, free to
+    disagree with the first.
+
+    **Why a consumer needs the field list, not just a flag.** ArcadeDB's
+    `SEARCH_INDEX` takes the index name, and a composite index is named by its
+    exact field list — `Concept[search_name, ontology_description]`. A client that
+    knows only "there is a full-text index" cannot form the call.
+
+    **Why the analyzer is part of the contract.** `StandardAnalyzer` does no
+    stemming and no accent folding; `brazilian` does both. The same query returns
+    different results, so a consumer that presents full-text as accent-insensitive
+    without checking would be wrong for the default configuration. Saying which
+    analyzer is in use lets it be honest instead.
+
+    Writes nothing when there is no index at all — a half-declared capability is
+    worse than none.
+    """
+    if context is None:
+        return
+    concept = [str(f) for f in concept_fields or []]
+    item = [str(f) for f in item_fields or []]
+    source = [str(f) for f in source_fields or []]
+    if not (concept or item or source):
+        return
+
+    context.fulltext_concept_fields = ",".join(concept)
+    context.fulltext_item_fields = ",".join(item)
+    context.fulltext_source_fields = ",".join(source)
+    context.fulltext_analyzer = str(analyzer or "")
+
+    # The prose block is what an MCP client actually reads; the scalar properties
+    # are only seen by a consumer that goes looking for them.
+    folds = _analyzer_folds_accents(analyzer)
+    lines = ["## Busca lexical (full-text)"]
+    if concept:
+        label = context.concept_label
+        lines.append(f"- conceitos (`{label}`): {_as_index(label, concept)}")
+    if item:
+        lines.append(f"- trechos (`Item`): {_as_index('Item', item)}")
+    if source:
+        lines.append(f"- referências (`Source`): {_as_index('Source', source)}")
+    lines.append(f"- analyzer `{analyzer}`")
+    lines.append(
+        "- **encontra sem acento e sem diferenciar caixa** (stemming do analyzer)"
+        if folds
+        else "- este analyzer **não** faz stemming nem dobra acento: `psicologicos` não "
+        "encontra `psicológicos`. Para busca insensível a acento, configure um "
+        "analyzer de idioma no projeto."
+    )
+    context.project_summary = f"{context.project_summary}\n\n" + "\n".join(lines)
+
+def _as_index(type_name: str, fields: Sequence[str]) -> str:
+    """The index identifier as `SEARCH_INDEX` expects it: `Type[field, field]`."""
+    return f"`{type_name}[{', '.join(fields)}]`"
+
+
+def _analyzer_folds_accents(analyzer: str) -> bool:
+    """Does this analyzer stem and fold accents?
+
+    Language analyzers do; `StandardAnalyzer` — the default — does not. The
+    distinction decides whether the consumer may present full-text as
+    accent-insensitive, so it is answered from the class name rather than assumed.
+    """
+    name = str(analyzer or "").lower()
+    if not name or "standard" in name:
+        return False
+    return any(
+        language in name
+        for language in (
+            "brazilian",
+            "portuguese",
+            "english",
+            "spanish",
+            "french",
+            "german",
+            "italian",
+        )
+    )
+
+
+def declare_metrics_provenance(
+    context: ProjectContextSpec | None,
+    backend: str,
+    scope: str,
+    scope_note: str = "",
+) -> None:
+    """Records which backend computed the network metrics, and over what.
+
+    Called by whoever ran them, with the scope that backend actually uses — not
+    inferred here, because only the metrics module knows whether its procedures
+    accept a projection filter.
+
+    The note reaches the prose block because that is what an MCP client reads: a
+    consumer ranking concepts by PageRank needs to know the score includes edges to
+    Items and Sources, and the scalar property alone would not tell it.
+    """
+    if context is None or not backend or not scope:
+        return
+    context.metrics_backend = str(backend)
+    context.metrics_scope = str(scope)
+
+    lines = [
+        "## Métricas de rede",
+        f"- calculadas pelo backend `{backend}`, escopo `{scope}`",
+    ]
+    if scope_note:
+        lines.append(f"- {scope_note}")
+    lines.append(
+        "- centralidade é uma **escolha metodológica**: grau, PageRank e betweenness "
+        "respondem perguntas diferentes. Diga qual usou."
+    )
+    context.project_summary = f"{context.project_summary}\n\n" + "\n".join(lines)
 
 
 @dataclass
@@ -817,6 +1103,10 @@ def compile_project(
         source_fields=source_fields,
         memo_field_name=memo_field_name,
         quotation_field_name=quotation_field_name,
+        # The root is KNOWN here: the `.synp` sits in it. Passing it beats
+        # inferring from the includes/traceability redundancy, which is textual
+        # and can fail — and a failed inference now omits the path entirely.
+        project_root=str(project_path.parent.resolve()).replace("\\", "/"),
     )
 
     return payload
@@ -851,8 +1141,17 @@ def _build_graph_payload(
     source_fields: Sequence[SourceFieldSpec | str],
     memo_field_name: str = "note",
     quotation_field_name: str = "citation",
+    project_root: str = "",
 ) -> GraphPayload:
-    """Transforms compiled JSON data into structured payload for Neo4j."""
+    """Transforms compiled JSON data into structured payload for Neo4j.
+
+    `project_root` is the directory the traceability paths are made relative to.
+    Pass it whenever the caller knows it — compiling a `.synp` does, since the
+    project file is right there. Inferring it from the redundancy between
+    `project.includes[]` and `traceability.file` is the fallback for callers that
+    cannot know, and it is textual: it can fail, and a failed inference used to
+    leave the absolute path in place.
+    """
     project_name = json_data.get("project", {}).get("name", "synesis")
     ontology = json_data.get("ontology", {})
     corpus = json_data.get("corpus", [])
@@ -895,6 +1194,8 @@ def _build_graph_payload(
         ontology_field_names,
         memo_field_name,
         quotation_field_name,
+        project_root=project_root
+        or project_root_from_includes(json_data.get("project") or {}, corpus),
     )
 
     # Reconcile chain/mention names against canonical ontology names (case-insensitive).
@@ -1241,7 +1542,10 @@ def _build_item_row(
     citation: str,
     description: str,
     item_extra: dict[str, str],
-) -> dict[str, str]:
+    source_file: str = "",
+    source_line: int | None = None,
+    annotation_id: str = "",
+) -> dict[str, Any]:
     """Builds the Item node row: structural properties plus the template's ITEM fields.
 
     The template fields (zone, confidence, score, ...) used to reach the HTML only,
@@ -1255,9 +1559,38 @@ def _build_item_row(
     restriction that motivated the original detour does not apply here.
 
     Structural keys always win: a template free to name a field `citation` must not
-    overwrite the quotation that the Item node is built around.
+    overwrite the quotation that the Item node is built around. `source_file` and
+    `source_line` join that protected set, for the same reason: they are the audit
+    trail back to the `.syn`, and a template field of the same name must not be able
+    to rewrite where a quotation came from.
+
+    The traceability pair is omitted when absent rather than written as null. A graph
+    exported before this existed and one whose corpus item simply had no location must
+    look the same to a consumer — `MATCH (i:Item) WHERE i.source_file IS NOT NULL` is
+    the honest way to ask, and writing empty strings would silently break it.
+
+    `annotation_id` is the identity of the annotated BLOCK, shared by every Item the
+    block produces. One `ITEM` block with four chains yields four `Item` vertices —
+    four analytical units over one excerpt — so `count(i)` and
+    `count(DISTINCT i.annotation_id)` answer different questions: how many analytical
+    items, and how many annotated excerpts. Both are legitimate; comparing one against
+    the other is not, and that is exactly the mistake that made an audit contradict a
+    correct answer (23 mentions read against 11 excerpts).
+
+    It joins the protected set for the same reason as the traceability pair: a template
+    field of this name must not be able to rewrite which block an excerpt belongs to.
     """
-    row = {"item_id": item_id, "citation": citation, "description": description}
+    row: dict[str, Any] = {
+        "item_id": item_id,
+        "citation": citation,
+        "description": description,
+    }
+    if source_file:
+        row["source_file"] = source_file
+    if source_line is not None:
+        row["source_line"] = source_line
+    if annotation_id:
+        row["annotation_id"] = annotation_id
     for key, value in item_extra.items():
         if key not in row:
             row[key] = value
@@ -1274,6 +1607,7 @@ def _extract_corpus_data(
     ontology_field_names: list[str],
     memo_field_name: str = "note",
     quotation_field_name: str = "citation",
+    project_root: str = "",
 ) -> tuple[
     list[dict[str, Any]],  # sources
     list[dict[str, Any]],  # items
@@ -1333,6 +1667,13 @@ def _extract_corpus_data(
         source_ref = corpus_item["source_ref"].lstrip("@")
         corpus_id = corpus_item["id"]
 
+        # Audit trail back to the `.syn`. The compiler already emits this in the
+        # canonical JSON (and in CSV/XLS); the graph was the only export dropping
+        # it, which left the chat unable to say where an answer came from.
+        traceability = corpus_item.get("traceability") or {}
+        item_source_file = relative_source_file(traceability.get("file") or "", project_root)
+        item_source_line = traceability.get("line")
+
         # Extract source (SOURCE...END SOURCE block)
         if source_ref not in seen_refs:
             source_props = _build_source_props(source_ref, corpus_item, bibliography, source_fields)
@@ -1381,7 +1722,17 @@ def _extract_corpus_data(
                 note = notes[idx - 1] if idx - 1 < len(notes) else shared_note
                 item_id = f"{corpus_id}_n{idx:04d}"
 
-                items.append(_build_item_row(item_id, base_text, note, item_extra))
+                items.append(
+                    _build_item_row(
+                        item_id,
+                        base_text,
+                        note,
+                        item_extra,
+                        item_source_file,
+                        item_source_line,
+                        corpus_id,
+                    )
+                )
                 if item_extra:
                     item_fields[item_id] = dict(item_extra)
                 from_source.append({"item_id": item_id, "ref": source_ref})
@@ -1446,7 +1797,17 @@ def _extract_corpus_data(
                 item_id = f"{corpus_id}_c{idx:04d}"
                 description = descriptions[idx - 1] if idx <= len(descriptions) else ""
 
-                items.append(_build_item_row(item_id, base_text, description, item_extra))
+                items.append(
+                    _build_item_row(
+                        item_id,
+                        base_text,
+                        description,
+                        item_extra,
+                        item_source_file,
+                        item_source_line,
+                        corpus_id,
+                    )
+                )
                 if item_extra:
                     item_fields[item_id] = dict(item_extra)
                 from_source.append({"item_id": item_id, "ref": source_ref})

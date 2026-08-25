@@ -11,7 +11,7 @@ except PackageNotFoundError:
     # Fallback for a source tree that was never installed. Kept in step with
     # pyproject: it is written into every graph as `ProjectContext.
     # synesis_graph_version`, so a stale value here would misreport provenance.
-    __version__ = "0.8.0"
+    __version__ = "0.9.0"
 
 # synesis2graph.py lives at the repo root — make it importable from anywhere.
 _repo_root = Path(__file__).parent.parent

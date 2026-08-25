@@ -13,6 +13,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-25
+
+### Added — network metrics declare their backend and scope
+
+`ProjectContext` now carries `metrics_backend` and `metrics_scope`.
+
+This is not bookkeeping: it changes how the number must be read. ArcadeDB's
+`algo.*` procedures accept no scope filter and run over the **whole graph**, so
+a concept's PageRank incorporates its edges to Items, Sources and taxonomy
+nodes; Neo4j's GDS projects only the concept subgraph. The two are not
+comparable, and a consumer ranking "most central concepts" had no way to know
+that from the score alone.
+
+The caveat already existed in `metrics_arcadedb.SCOPE_NOTE` — it reached the CLI
+output and never the graph.
+
+- Declared **before the sync writes the context**, because the metrics
+  themselves run after it; which backend will compute them is known earlier.
+- The prose block also states that centrality is a **methodological choice** —
+  degree, PageRank and betweenness answer different questions — and that the
+  consumer must say which one it used.
+
+### Added — the graph declares its full-text capability
+
+`ProjectContext` now carries `fulltext_concept_fields`, `fulltext_item_fields`,
+`fulltext_source_fields` and `fulltext_analyzer`.
+
+The indexes already existed — this backend builds them over the humanised
+concept name and the template's text fields, with a configurable Lucene
+analyzer. What was missing is that **a consumer had no way to find out**:
+`get_schema` lists properties, not indexes. So the chat assistant was working
+around, in natural language, a problem this layer already solved — it instructed
+the model to cut a search term before its first accented character, because
+`CONTAINS 'psicologicos'` misses `psicológicos`.
+
+- The **exact field list** is declared, not a flag: `SEARCH_INDEX` addresses a
+  composite index by its full name — `Concept[search_name, ontology_description]`
+  — so a consumer that only knew "there is an index" could not form the call.
+- The **analyzer is part of the contract.** `StandardAnalyzer` does no stemming
+  and no accent folding; `brazilian` does both. The prose block says which,
+  rather than letting a consumer present full-text as accent-insensitive when it
+  is not.
+- Declared from the **same field lists that fed `CREATE INDEX`**, so the
+  declaration cannot drift from what exists.
+- **ArcadeDB only.** Neo4j has full-text too, but it is queried through
+  `db.index.fulltext.queryNodes`; announcing one backend's syntax for the other's
+  graph would teach a query that always fails.
+
+### Changed — traceability paths: explicit root, and omission over leakage
+
+`relative_source_file()` now **omits** `source_file` when relativisation fails,
+instead of falling back to the absolute path.
+
+Keeping it was documented as "a wart, never a crash". It is worse than a wart:
+the absolute path leaks the exporting machine's directory layout to everyone the
+graph is shared with, and it does not resolve on the reader's machine — so the
+anchor it produces is a link that cannot open. An absent `source_file` is honest;
+a wrong one promises verification and fails.
+
+- The root is now **passed explicitly** by `compile_project()` and by each member
+  of a linked study, which know it: the `.synp` sits in it. Inference from the
+  `project.includes[]` / `traceability.file` redundancy remains the fallback for
+  `load_json_project()`, where the original directory may no longer exist.
+- In a linked study each member gets **its own root** before `merge_payloads` —
+  the projects live in different directories, and no single root is correct for
+  all of them.
+- The containment check compares **path components**, not the raw prefix:
+  `D:/proj-evil` starts with `D:/proj` as a string but is not inside it.
+
+### Added — `Item.annotation_id`: the counting unit becomes expressible
+
+Every `Item` now carries the identity of the **annotated block** it came from,
+shared by all the items that block produced.
+
+One `ITEM` block with four chains yields four `Item` vertices — four analytical
+units over one annotated excerpt. Both counts are legitimate answers to
+different questions; reading one as the other is not, and that is what made an
+audit turn contradict a correct answer (it reported 11 where the bank said 20).
+
+Without this property the distinction was not expressible in a query: counting
+excerpts meant guessing by grouping on file and line.
+
+| Unit | Expression |
+|---|---|
+| sources | `count(DISTINCT s.bibtex)` |
+| annotated excerpts | `count(DISTINCT i.annotation_id)` |
+| analytical items | `count(DISTINCT i.item_id)` |
+| mentions | `MENTIONS` edges |
+| concepts | `count(DISTINCT c.name)` |
+
+- Built from `corpus_id`, which was already available where the `item_id`
+  suffixes (`_c0001`/`_n0001`) are appended — no inference from text or line.
+- Joins the **protected set**: a template free to name a field `annotation_id`
+  must not be able to rewrite which block an excerpt belongs to.
+- **Omitted, not null**, when absent — the rule the traceability pair follows.
+
+### Changed — `Item.source_line` is declared `INTEGER` in the ArcadeDB schema
+
+It was left schema-less because `_declare_property` only wrote `STRING`, which
+ArcadeDB rejects for an integer. The typed helper removed that limitation, and
+an undeclared property is **invisible to `get_schema`** — which is how the chat
+discovers what the graph offers.
+
+### Added — the audit trail reaches the graph (`Item.source_file`, `Item.source_line`)
+
+Every `Item` now carries the `.syn` file and line it was annotated on. A consumer
+can go from a concept to the excerpt, to the reference, and finally **to the line
+the researcher wrote** — the chat assistant turns it into a clickable link.
+
+The data already existed and was being thrown away. The compiler emits
+`traceability: {file, line}` in the canonical JSON, and CSV/XLS export it as
+`source_file`/`source_line`; the graph was the **only export dropping it**, which
+is why a graph-backed answer could not say where it came from.
+
+- The path is stored **relative to the project root**, inferred from the
+  redundancy between `project.includes[].path` (relative) and
+  `traceability.file` (absolute). An absolute path would leak the exporting
+  machine's directory layout and would not resolve for whoever reads the graph.
+- The pair is **omitted, not null**, when a corpus item has no location, so
+  `WHERE i.source_file IS NOT NULL` stays honest.
+- `source_file` and `source_line` join the structural keys that a template field
+  of the same name cannot overwrite — the same protection `citation` already had.
+- Neo4j needed no change (`SET i = row`); ArcadeDB declares `source_file` so the
+  property is visible to schema introspection.
+
+### Added — the graph declares its semantic search capability
+
+`ProjectContext` now records which ontology fields were embedded, with which
+model and how many dimensions, whenever a sync runs with `--vector-embeddings`.
+
+A client could already see from `get_schema` that a vector index exists, but not
+**which field produced the vectors** — and that changes what proximity means:
+over `ontology_description` it is conceptual similarity, over `topic` it is
+thematic co-occurrence.
+
+- Declared from the embeddings sidecar, **never inferred from the index**: an
+  index survives a re-sync without vectors, and reading the capability off it
+  would announce something the data no longer has.
+- A partial declaration is refused — a consumer would query by a field
+  composition that never existed.
+- The prose summary also states that **vector proximity is approximate**: a
+  neighbour is a reading suggestion, not something the researcher asserted.
+
+### Added — network metrics are declared in the ArcadeDB schema
+
+The eight metrics the sync already computes (`pagerank`, `betweenness`,
+`community`, `degree`, `in_degree`, `out_degree`, `mention_count`,
+`source_count`) are now declared, and therefore visible to MCP introspection.
+
+They were being written and stayed invisible: asked for the most central
+concepts, an MCP client counted edges by hand and produced a *degree* ranking,
+because it had no way to learn that `pagerank` was already there. The two
+rankings differ — on a real corpus the top two by degree are not in the top five
+by PageRank.
+
+- `_declare_property()` accepts a declared type, whitelisted. `pagerank` and
+  `betweenness` are DOUBLE, the rest INTEGER; declaring them STRING would make
+  the server reject the value at sync time.
+- Accepted types verified against ArcadeDB 26.7.3.
+
 ## [0.8.0] - 2026-08-23
 
 ### Added — the exported graph now describes itself (`ProjectContext`)
