@@ -11,6 +11,7 @@ extra; the rest exercise the decisions, which are the part worth pinning.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -186,8 +187,25 @@ pytest.importorskip(
 )
 
 
+@pytest.mark.skipif(
+    not os.environ.get("SYNESIS_TEST_LIVE_SERVER"),
+    reason=(
+        "starts a full ArcadeDB server; the JVM segfaults on Linux while the "
+        "interpreter shuts down. Set SYNESIS_TEST_LIVE_SERVER=1 to run it."
+    ),
+)
 def test_a_served_database_answers_over_mcp(tmp_path):
     """Export, serve, query — the whole of Phase B, with no server installed.
+
+    Opt-in rather than deleted: this is the only end-to-end proof that MCP
+    answers over a real socket, and it passes. What fails is the teardown —
+    every test in the run succeeds, then the JVM crashes as Python exits,
+    turning a green suite into exit code 139 (run 33134063688, Python 3.11 on
+    ubuntu). The crash is in the engine's shutdown, not in anything this
+    package does, and it takes the whole job down with it.
+
+    Everything `serve` itself decides — permissions, layout, credentials, the
+    client entries — is covered by the tests above, which need no server.
 
     Uses a non-default port so a real ArcadeDB on 2480 does not collide.
     """

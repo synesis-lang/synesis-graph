@@ -31,13 +31,14 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 
 
-def _declared_version() -> str:
-    """Versao do pyproject.toml — a fonte unica de verdade.
+def _pyproject() -> dict:
+    """The parsed pyproject, with the 3.10 fallback in one place.
 
-    `tomllib` so entrou na stdlib no 3.11, mas o pacote declara
-    `requires-python = ">=3.10"` e o CI roda a matriz nos tres. Sem este
-    fallback os testes de versao quebram apenas no piso — foi o que derrubou
-    3 dos 9 jobs no run 31452586097.
+    `tomllib` only entered the stdlib in 3.11, but the package declares
+    `requires-python = ">=3.10"` and CI runs the matrix on all three. Without
+    this fallback the tests break only on the floor — that took down 3 of 9 jobs
+    in run 31452586097, and again in 33134063688 when a new test imported
+    `tomllib` directly instead of coming through here.
     """
     try:
         import tomllib
@@ -45,7 +46,12 @@ def _declared_version() -> str:
         import tomli as tomllib
 
     with open(REPO_ROOT / "pyproject.toml", "rb") as fh:
-        return tomllib.load(fh)["project"]["version"]
+        return tomllib.load(fh)
+
+
+def _declared_version() -> str:
+    """Versao do pyproject.toml — a fonte unica de verdade."""
+    return _pyproject()["project"]["version"]
 
 pytestmark = pytest.mark.skipif(
     subprocess.run(
@@ -169,10 +175,7 @@ class TestOptionalExtras:
     """
 
     def _extras(self) -> dict:
-        import tomllib
-
-        data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        return data["project"]["optional-dependencies"]
+        return _pyproject()["project"]["optional-dependencies"]
 
     def test_every_extra_named_in_an_error_message_exists(self):
         """Fonte da verdade: o proprio codigo, nao uma lista mantida a mao."""
@@ -197,9 +200,6 @@ class TestOptionalExtras:
         (~67 MB) e menor do que essa friccao. O extra permanece declarado para
         nao quebrar quem seguiu instrucoes antigas.
         """
-        import tomllib
-
-        data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        base = " ".join(data["project"]["dependencies"])
+        base = " ".join(_pyproject()["project"]["dependencies"])
         assert "arcadedb-embedded" in base, "o motor local deve vir na instalacao base"
         assert "arcadedb-embedded" in self._extras(), "o extra antigo deve seguir valido"
