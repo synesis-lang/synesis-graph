@@ -10,6 +10,7 @@ from synesis_graph.core import (
     GraphPayload,
     ProjectContextSpec,
     SyncError,
+    dedupe_index_props,
     get_taxonomy_labels,
     text_source_field_names,
 )
@@ -134,7 +135,15 @@ def _create_search_indexes(
     """
 
     def _props(alias: str, fields: list[str]) -> str:
-        return ", ".join(f"{alias}.{f}" for f in fields if validate_cypher_label(f))
+        """Renders one index's property list, each property exactly once.
+
+        The dedup is not cosmetic: Neo4j rejects a composite index that repeats a
+        property (`RepeatedPropertyInCompositeSchema`), and the Source list
+        prepends the structural `title`/`abstract` to the template's own TEXT
+        fields — a template is free to declare a field called `title`.
+        """
+        unique = dedupe_index_props(f for f in fields if validate_cypher_label(f))
+        return ", ".join(f"{alias}.{f}" for f in unique)
 
     def _create(name: str, pattern: str, props: str) -> None:
         """Drops and recreates one full-text index.

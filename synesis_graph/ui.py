@@ -76,7 +76,9 @@ class TaskReporter:
         ok = self.stats["errors"] == 0
         status = _c("SUCCESS", fg="green", bold=True) if ok else _c("FAIL", fg="red", bold=True)
         label = _label_ok() if ok else _label_error()
-        _emit(f"{label} {status} em {duration}s")
+        # "em" was a stray Portuguese word in an otherwise English interface —
+        # the sort of thing that reads as a typo and quietly costs trust.
+        _emit(f"{label} {status} in {duration}s")
 
 
 class _StepContext:

@@ -21,7 +21,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from synesis_graph.arcadedb_client import ArcadeDBClient, ArcadeDBError
+from synesis_graph.arcadedb_client import ArcadeDBError
+from synesis_graph.arcadedb_transport import ArcadeDBTransport
 from synesis_graph.backends.neo4j import (
     _sync_concepts,
     _sync_entities,
@@ -38,6 +39,7 @@ from synesis_graph.core import (
     GraphPayload,
     SyncError,
     declare_fulltext_capability,
+    dedupe_index_props,
     get_taxonomy_labels,
     resolve_arcadedb_analyzer,
     text_source_field_names,
@@ -106,7 +108,7 @@ PROJECT_CONTEXT_TEXT_PROPS = (
 
 
 class _CypherRunner:
-    """Adapts ArcadeDBClient to the `tx.run(query, **params)` interface.
+    """Adapts an ArcadeDBTransport to the `tx.run(query, **params)` interface.
 
     This is what lets the `_sync_*` functions be reused verbatim: they were written
     against a Neo4j transaction object and only ever call `.run()`. Rather than
@@ -114,7 +116,7 @@ class _CypherRunner:
     expect.
     """
 
-    def __init__(self, client: ArcadeDBClient):
+    def __init__(self, client: ArcadeDBTransport):
         self._client = client
 
     def run(self, query: str, **params: Any) -> list[dict[str, Any]]:
@@ -122,7 +124,7 @@ class _CypherRunner:
 
 
 def sync_to_arcadedb(
-    client: ArcadeDBClient,
+    client: ArcadeDBTransport,
     payload: GraphPayload,
     fulltext_analyzer: str = DEFAULT_ARCADEDB_ANALYZER,
     embeddings: EmbeddingsSidecar | None = None,
@@ -169,17 +171,21 @@ def _concept_index_props(payload: GraphPayload) -> list[str]:
     text field. `graph_fields` stay out — they become taxonomy nodes of their own,
     and indexing a closed vocabulary as prose only dilutes the index.
     """
-    return [p for p in ["search_name", *payload.scalar_fields] if validate_cypher_label(p)]
+    return dedupe_index_props(
+        p for p in ["search_name", *payload.scalar_fields] if validate_cypher_label(p)
+    )
 
 
 def _source_index_props(payload: GraphPayload) -> list[str]:
     """Source properties that belong in the full-text index."""
     text_fields = text_source_field_names(payload.source_fields)
-    return [p for p in [*SOURCE_TEXT_PROPS, *text_fields] if validate_cypher_label(p)]
+    return dedupe_index_props(
+        p for p in [*SOURCE_TEXT_PROPS, *text_fields] if validate_cypher_label(p)
+    )
 
 
 def _declare_property(
-    client: ArcadeDBClient, type_name: str, prop: str, declared_type: str = "STRING"
+    client: ArcadeDBTransport, type_name: str, prop: str, declared_type: str = "STRING"
 ) -> None:
     """Declares one property, if the name is safe to interpolate.
 
@@ -206,7 +212,7 @@ def _declare_property(
     )
 
 
-def _create_schema(client: ArcadeDBClient, payload: GraphPayload) -> None:
+def _create_schema(client: ArcadeDBTransport, payload: GraphPayload) -> None:
     """Declares the types and the properties that will be indexed.
 
     **This step has no Neo4j counterpart and is not optional.** Cypher creates
@@ -297,7 +303,7 @@ def _create_schema(client: ArcadeDBClient, payload: GraphPayload) -> None:
         _declare_property(client, "Source", prop)
 
 
-def _create_constraints(client: ArcadeDBClient, payload: GraphPayload) -> None:
+def _create_constraints(client: ArcadeDBTransport, payload: GraphPayload) -> None:
     """Creates the uniqueness indexes.
 
     ArcadeDB expresses uniqueness as a UNIQUE index rather than Cypher's
@@ -317,14 +323,14 @@ def _create_constraints(client: ArcadeDBClient, payload: GraphPayload) -> None:
         _create_unique_index(client, label, "entity_id")
 
 
-def _create_unique_index(client: ArcadeDBClient, type_name: str, prop: str) -> None:
+def _create_unique_index(client: ArcadeDBTransport, type_name: str, prop: str) -> None:
     if not validate_cypher_label(type_name) or not validate_cypher_label(prop):
         return
     client.command(f"CREATE INDEX IF NOT EXISTS ON {type_name} ({prop}) UNIQUE", language="sql")
 
 
 def _create_search_indexes(
-    client: ArcadeDBClient,
+    client: ArcadeDBTransport,
     payload: GraphPayload,
     fulltext_analyzer: str = DEFAULT_ARCADEDB_ANALYZER,
 ) -> None:
@@ -378,7 +384,7 @@ def _declare_fulltext(payload: GraphPayload, fulltext_analyzer: str) -> None:
 
 
 def _create_fulltext_index(
-    client: ArcadeDBClient, type_name: str, props: list[str], analyzer: str
+    client: ArcadeDBTransport, type_name: str, props: list[str], analyzer: str
 ) -> None:
     """Creates one full-text index.
 
@@ -424,7 +430,7 @@ VECTOR_PROPERTY_NAME = "embedding"
 
 
 def create_vector_schema(
-    client: ArcadeDBClient,
+    client: ArcadeDBTransport,
     concept_label: str,
     dimensions: int,
     *,
@@ -473,7 +479,7 @@ def _is_safe_metadata_word(value: str) -> bool:
 
 
 def sync_vectors(
-    client: ArcadeDBClient,
+    client: ArcadeDBTransport,
     concept_label: str,
     vectors: dict[str, list[float]],
     *,
@@ -512,7 +518,7 @@ def sync_vectors(
 # ---------------------------------------------------------------------------
 # Clearing
 # ---------------------------------------------------------------------------
-def clear_database(client: ArcadeDBClient) -> None:
+def clear_database(client: ArcadeDBTransport) -> None:
     """Removes all data and indexes, leaving the compiler as the source of truth.
 
     Two ArcadeDB specifics, both found while piloting face85:
@@ -549,7 +555,7 @@ def clear_database(client: ArcadeDBClient) -> None:
 # ---------------------------------------------------------------------------
 # Sync
 # ---------------------------------------------------------------------------
-def _execute_sync_transaction(client: ArcadeDBClient, payload: GraphPayload) -> None:
+def _execute_sync_transaction(client: ArcadeDBTransport, payload: GraphPayload) -> None:
     """Writes the whole payload inside one server-side transaction.
 
     The ordering matches `sync_to_neo4j` and is load-bearing: items and sources must
@@ -579,7 +585,7 @@ def _execute_sync_transaction(client: ArcadeDBClient, payload: GraphPayload) -> 
 
 
 def _sync_embeddings(
-    client: ArcadeDBClient,
+    client: ArcadeDBTransport,
     payload: GraphPayload,
     embeddings: EmbeddingsSidecar,
 ) -> SyncError | None:

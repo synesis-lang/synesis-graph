@@ -13,6 +13,366 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ## [Não lançado]
 
+## [0.10.0] - 2026-08-27
+
+### Added — a camada de sync do ArcadeDB passa a ser tipada por um contrato de transporte
+
+O novo Protocol `ArcadeDBTransport` nomeia o que a camada de sync realmente exige
+de uma conexão: `command`, `query`, `begin`, `commit`, `rollback` e o atributo
+`database`. `backends/arcadedb.py` e `metrics_arcadedb.py` agora anotam contra ele,
+não mais contra a classe concreta `ArcadeDBClient`.
+
+Nada muda em tempo de execução — é uma mudança de tipos. O que ela compra é espaço
+para um segundo transporte: o motor embedded, in-process, fala o mesmo Cypher e o
+mesmo SQL, e com a camada de sync tipada pelo contrato, acrescentá-lo não toca
+nenhuma query, nenhuma instrução de schema, nenhuma das oito funções `_sync_*`.
+
+- **Tipagem estrutural, para o custo recair sobre quem chega.** `ArcadeDBClient`
+  satisfaz o Protocol sem herdar dele, sem registro e sem importá-lo. Uma classe-base
+  abstrata obrigaria a mexer no cliente HTTP — em produção — para beneficiar um
+  backend que ainda não existe.
+- **Deliberadamente menor que o cliente.** `is_ready`, `list_databases`,
+  `create_database` e `close` ficam de fora: são preflight, setup e teardown, vivem
+  no adapter, e são justamente onde os dois transportes divergem (um banco
+  in-process não tem servidor a sondar nem credencial a exercitar).
+- `language` continua keyword-com-default, em vez de seguir a assinatura
+  posicional-primeiro do motor embedded, para que os 20 call sites sigam
+  funcionando sem alteração.
+- A conformidade é trancada por testes que comparam as duas superfícies de forma
+  mecânica (`inspect.Signature`), e não por reescrever as assinaturas à mão — uma
+  expectativa copiada à mão desanda tão fácil quanto o código. Verificado que
+  falha diante de divergência real.
+
+### Added — um transporte ArcadeDB in-process (`ArcadeDBEmbeddedClient`)
+
+O `arcadedb-embedded` traz o motor real mais uma JRE embutida, de modo que um grafo
+pode ser gerado e consultado sem nada instalado além do `pip` — sem Java, sem
+servidor, sem porta. Esta classe o adapta ao `ArcadeDBTransport`, o que faz a camada
+de sync rodar sobre ele sem alteração: nenhuma query reescrita, nenhuma instrução de
+schema tocada, nenhuma das oito funções `_sync_*` modificada.
+
+Ela existe para absorver cinco divergências entre o binding e o cliente HTTP. Todas
+foram medidas contra o `arcadedb-embedded` 26.8.1, e todas são falhas **silenciosas**
+se deixadas a cargo de quem chama — o código roda, não levanta erro, e devolve
+resultado errado:
+
+- **`language` é o primeiro argumento posicional do binding.** Esta classe mantém a
+  assinatura keyword-com-default do cliente; seguir o binding faria toda chamada não
+  qualificada da camada de sync executar na linguagem errada.
+- **Uma escrita devolve `None`, não um resultado vazio.** A camada de sync itera o
+  resultado direto, então `None` vira `[]` aqui, e não um `TypeError` num call site.
+- **`ResultSet` é de passe único.** Lê-lo duas vezes devolve `[]` na segunda, sem
+  erro. Os resultados são materializados nesta fronteira — o único lugar que sabe
+  que o cursor ainda não foi lido.
+- **Passar `None` como parâmetros levanta `Ambiguous overloads`** no JPype, que não
+  resolve a sobrecarga Java a partir de um nulo. O argumento é omitido por completo
+  quando não há parâmetros. Esta pareceria intermitente: só dispara em instruções
+  sem parâmetros.
+- **O binding levanta seu próprio `ArcadeDBError`, de mesmo nome,** em outro módulo.
+  Nove pontos `except ArcadeDBError` esperam a classe deste pacote; sem tradução,
+  cada um deixaria um erro do motor escapar sem tratamento, passando ao largo do
+  código escrito para reportá-lo.
+
+A dependência opcional é importada preguiçosamente e reportada como `ArcadeDBError`
+acionável — o mesmo padrão que o provedor de embeddings já usa — para que os demais
+backends sigam funcionando quando o extra estiver ausente.
+
+### Added — configuração `[arcadedb-embedded]` e o nome do backend
+
+`ArcadeDBEmbeddedConfig` e a constante de backend `arcadedb-embedded`. O adapter
+que os consome vem em seguida; aqui está a superfície de configuração.
+
+- **Seção própria, não reaproveitamento de `[arcadedb]`.** Compartilhar aquele
+  bloco deixaria `uri`, `user` e `password` no arquivo, lidos por ninguém — um
+  campo que parece respeitado e não é constitui o formato de defeito que este
+  projeto insiste em pagar. Uma seção distinta torna o modo visível no arquivo.
+- **Todo campo é opcional, e a seção também — e o arquivo.** Não há credencial a
+  fornecer nem host a alcançar, então os defaults já descrevem uma configuração
+  funcional; exigir um arquivo cujo cada valor repete um default é atrito sem
+  nada por trás. Seções malformadas continuam sendo reportadas, porque são erros
+  de digitação, não omissões.
+- **`db_path` é a raiz do servidor, não o diretório do banco.** O banco é criado
+  em `<db_path>/databases/<projeto>`, que é onde o servidor do ArcadeDB procura.
+  Apontá-lo um nível abaixo produz a pior falha disponível aqui: o servidor sobe,
+  registra o endpoint MCP, reporta sucesso e não encontra banco nenhum — nada dá
+  erro, o corpus fica simplesmente invisível. O layout é derivado por um único
+  método, de modo que quem grava o grafo e quem o serve não podem divergir.
+- A raiz padrão é `.`, não `./databases`: a raiz já ganha um filho `databases/`, e
+  `databases/databases/face85` parece um bug — o que convida à "correção" que cai
+  exatamente na falha silenciosa acima.
+- `[arcadedb_embedded]` (sublinhado) também é aceito, para quem conhece
+  `[tool.ruff]`.
+
+### Added — o adapter do backend embedded, sobre uma base compartilhada com o HTTP
+
+`ArcadeDBEmbeddedBackendAdapter` fecha o caminho local: um projeto agora exporta
+para um diretório, sem servidor, sem porta e sem Java instalado.
+
+- **`_ArcadeDBAdapterBase` concentra tudo depois da conexão.** O motor é o mesmo
+  seja qual for a via de acesso, então limpeza, sync, métricas e close são
+  escritos uma vez. Só `preflight`, `connect` e `prepare_destination` divergem, e
+  cada um é mais simples aqui pelo mesmo motivo: não há servidor no caminho.
+- **As duas perguntas "isto é ArcadeDB?" do pipeline passam a ter uma resposta
+  só.** Ele pergunta para pendurar o sidecar de embeddings e para registrar a
+  ressalva de escopo das métricas, e ambas valem para qualquer transporte — mesmo
+  motor, mesma limitação de grafo inteiro do `algo.*`. Nomear os dois adapters em
+  cada ponto colocaria essa regra em dois lugares a manter em sincronia; nenhuma
+  terceira verificação foi acrescentada.
+- **`connect` deliberadamente não faz nada.** O adapter HTTP abre um cliente ali
+  porque seu alvo existe independentemente do projeto; um banco embedded *é* um
+  diretório com o nome do projeto, então a abertura espera o payload.
+- **`preflight` verifica o que pode de fato falhar** — se o pacote opcional está
+  instalado e se a raiz é gravável. Ambos reportados antes da compilação, o que
+  num corpus de 41 mil itens é a diferença entre perder um minuto e perder uma
+  hora.
+- `prepare_destination` deriva o diretório do `ArcadeDBEmbeddedConfig` em vez de
+  montar o caminho por conta própria, para que a exportação e o futuro lado
+  servidor não possam divergir quanto ao layout.
+- O adapter HTTP passa a declarar seu `client` como o `ArcadeDBClient` concreto:
+  `create_database` é operação de servidor, ausente do contrato de transporte por
+  desenho. Estreitar na subclasse mantém essa chamada verificada sem alargar o
+  contrato para um transporte que não tem servidor a quem enviá-la.
+
+### Added — `synesis-graph arcadedb-embedded`
+
+O caminho local vira um comando. Um projeto exporta para um diretório sem
+servidor no ar, sem porta a administrar e sem Java instalado:
+
+```
+synesis-graph arcadedb-embedded --project project.synp
+```
+
+- **`--config` é opcional aqui.** Não há credencial a fornecer nem host a
+  alcançar, então os defaults descrevem uma configuração funcional; o comando
+  roda num diretório sem `config.toml` nenhum.
+- **`--db-path` é a raiz do servidor**, e a ajuda diz isso — o banco é criado em
+  `<DIR>/databases/<nome_do_projeto>`. Apontá-lo direto para um diretório de banco
+  é o engano que faz o lado servidor subir, reportar sucesso e não achar nada;
+  por isso a flag documenta o layout em vez de supor que ele seja conhecido.
+- **Fica em "Graph Backends" no `--help`**, junto dos outros três: exporta e sai.
+  Um comando de longa duração não caberia ali, que é precisamente o motivo de o
+  agrupamento existir.
+- `--vector-embeddings` e `--rebuild-embeddings` funcionam como no backend de
+  servidor, e a trava contra reconstruir sem campos cita
+  `[arcadedb-embedded.embeddings]` — não `[arcadedb]`, que é outro modo.
+
+Overrides de CLI agnósticos de backend (`cli_overrides`) substituem o que era um
+mecanismo exclusivo do HTML. Uma flag que o usuário não passou continua `None` e
+nunca desloca um valor configurado, de modo que uma flag não usada não pode
+zerar o arquivo em silêncio.
+
+### Added — `synesis-graph serve`, e o grafo local alcança os clientes de chat
+
+Fase B. Os comandos de exportação gravam um grafo e encerram; este abre um grafo
+já construído e o mantém acessível, para que Claude Desktop, Claude Code ou a
+extensão do VSCode possam perguntar a ele:
+
+```
+synesis-graph serve
+```
+
+O motor faz quase tudo sozinho — o `arcadedb-embedded` traz o servidor ArcadeDB
+real e descobre seu plugin MCP automaticamente. Três coisas que ele **não** faz
+são o motivo de isto ser um comando, e não um trecho a colar:
+
+- **O MCP nasce desabilitado.** A distribuição embedded não traz o
+  `config/mcp-config.json` que o servidor standalone lê, então o plugin registra
+  e em seguida recusa toda chamada. A configuração vive no servidor em execução,
+  não em disco, de modo que habilitá-la precisa acontecer a **cada** start.
+- **Somente-leitura não é o padrão.** Escritas ficam desligadas a menos que
+  `--allow-writes` diga o contrário: um corpus são meses de trabalho de
+  codificação, e lê-lo é o caso de uso. Cada flag de permissão é declarada em vez
+  de herdada, para que um default futuro do motor não possa alargar em silêncio o
+  que um cliente de chat pode fazer. `allowAdmin` permanece desligado mesmo com
+  `--allow-writes` — chamadas administrativas alcançam além do corpus, o próprio
+  servidor.
+- **Uma senha precisa existir e não pode ser anotada.** Uma é gerada por sessão e
+  impressa junto da entrada `mcpServers` a colar; `SYNESIS_DB_PASSWORD` mantém uma
+  entre reinícios, para a configuração do cliente seguir válida. Nada é gravado em
+  arquivo do projeto.
+
+Servir uma raiz sem banco algum sob `databases/` é recusado, com o comando de
+exportação que resolve. Essa checagem é o contrato de layout visto do outro lado:
+um servidor iniciado sobre o diretório errado sobe tranquilamente, registra o MCP
+e responde toda query sem nenhuma linha.
+
+O `--help` agora agrupa os comandos. Backends exportam e saem; `serve` publica e
+permanece — distinção que vale mostrar, porque é o que mantém o papel do módulo
+legível conforme ele cresce.
+
+### Added — o backend local validado num corpus real
+
+**Validado contra o corpus Quinto_Andar** — 41.474 itens, 7.293 conceitos, 661
+fontes, exportados em 113s sem servidor algum no ar. As **16** contagens de nós e
+relações batem exatamente com a exportação do Neo4j Aura: `Item` 41.474,
+`FROM_SOURCE` 41.474, `MENTIONS` 61.796, `RELATES_TO` 19.126, `GROUPED_BY` 7.293,
+e todos os demais rótulos e arestas de taxonomia. O `ProjectContext` carrega as
+mesmas contagens, e o backend embedded ainda declara sua capacidade full-text, o
+que o do Neo4j não faz.
+
+No corpus face85 os dois transportes foram comparados diretamente, e os vetores
+são o detalhe decisivo: os mesmos 210 conceitos, as mesmas 49 comunidades,
+PageRank coincidindo até a oitava casa decimal, e o `vectorNeighbors` devolvendo
+os mesmos vizinhos na mesma ordem. Os vetores gravados são idênticos byte a byte.
+
+Este é o critério contra o qual toda a série embedded foi escrita: o mesmo grafo,
+a partir do mesmo projeto, sem Java e sem servidor de banco em momento algum.
+
+Os READMEs (EN e PT) documentam o terceiro backend, quando preferi-lo ao de
+servidor, e o comando `serve`.
+
+### Changed — o motor de grafo local passa a vir junto com o pacote
+
+`pip install synesis-graph` já traz o motor ArcadeDB in-process. Não há extra a
+lembrar, nem Java a instalar: o wheel carrega a própria JVM.
+
+Quem decidiu isso foi o público. "Instale o extra certo" é mais uma etapa para
+errar antes de ver qualquer resultado, e quem tem mais chance de errar é quem tem
+menos ferramentas para diagnosticar. ~67 MB é um preço menor do que essa fricção.
+Quem usa só Neo4j ou HTML passa a carregar peso que não usa — troca deliberada,
+decidida a favor do pesquisador.
+
+`synesis-graph[arcadedb-embedded]` continua resolvendo, então instruções antigas
+seguem funcionando.
+
+### Changed — o terminal fala com o pesquisador, não com o banco
+
+Exportar um corpus imprimia sessenta linhas de detalhes internos do motor — cada
+índice construído, cada sub-índice dividido, cada página escrita — com as três
+linhas que importavam soterradas no meio. Pior: `WARNI` e `Building index
+'Item_0_406270...'` pareciam indicar que algo deu errado.
+
+O logging do motor agora é configurado para avisos, e as duas linhas de
+inicialização da JVM sobre as quais não há nada a fazer são filtradas. Qualquer
+outra coisa que o Java disser continua chegando ao terminal: uma falha real nunca
+é engolida, e isso está trancado por teste.
+
+Os rótulos das etapas mudaram junto, de implementação para intenção:
+
+| Antes | Agora |
+|---|---|
+| `Compiling Project (In-Memory)` | `Reading your project` |
+| `41474 items compiled` | `41.474 coded excerpts read` |
+| `Synchronizing Graph (Transactional)` | `Building the graph` |
+| `Calculating Native Metrics` | `Measuring the graph` |
+| `Calculating Graph Algorithms` | `Finding central concepts and communities` |
+| `Target database: …` | `Graph location: …` |
+
+- A ressalva das métricas passa a ter **duas redações**: o `ProjectContext` mantém
+  a precisa, que nomeia `algo.*`, porque quem a lê é um programa prestes a ranquear
+  conceitos por esses números; o terminal recebe a versão simples, porque quem a lê
+  precisa saber apenas que esses números não se comparam aos de uma exportação Neo4j.
+- Uma exportação concluída agora diz **onde o grafo está e qual é o passo seguinte**
+  — ela é meio, não fim, e um pesquisador deixado com um diretório não tem como
+  adivinhar que o `serve` existe.
+- `SUCCESS em 3s` tinha uma palavra solta em português numa interface em inglês.
+
+### Fixed — um segundo `serve` no mesmo grafo falhava com HTTP 403
+
+O motor honra `root_password` apenas enquanto cria o
+`config/server-users.jsonl`. Todo start posterior lê o hash gravado e ignora o
+que recebe — em silêncio. O `serve` gerava senha nova a cada sessão, então a
+primeira execução funcionava e todas as seguintes autenticavam contra uma
+credencial que ninguém tinha: o servidor subia, reportava sucesso e respondia
+`User/Password not valid`.
+
+- A senha agora é **gerada uma vez e lembrada** junto do estado do próprio
+  servidor, então reinícios seguem funcionando sem variável a definir. O
+  `SYNESIS_DB_PASSWORD` continua servindo para escolher a sua.
+- Uma credencial já gravada mas **desconhecida por todos** — o estado deixado por
+  qualquer versão anterior — é **resetada em vez de reportada**. Ela não protege
+  nada: um servidor local, alcançável só desta máquina, cuja senha existe porque
+  o motor exige uma. Recusar seria entregar uma tarefa cuja única resposta
+  possível é sim. O arquivo antigo é posto de lado como `.superseded`, nunca
+  apagado, e `databases/` não é tocado.
+- Uma senha abaixo do mínimo de 8 caracteres do motor passa a ser recusada
+  **antes** de subir, nomeando a variável que a definiu.
+- Uma falha ao iniciar não acrescenta mais "a porta está em uso?" a uma mensagem
+  do motor que nada tem a ver. O palpite só aparece quando o erro cita a porta.
+
+### Changed — o `--install` nomeia o cliente, e o VS Code passa a ter suporte real
+
+O VS Code lê outro formato: `servers` em vez de `mcpServers`, HTTP direto com um
+objeto `headers`, e nenhuma ponte `npx`/`mcp-remote`. O snippet anterior dizia
+servir "Claude Desktop, Claude Code ou a extensão do VSCode" enquanto emitia um
+formato que o VS Code ignora em silêncio — sem erro, o servidor simplesmente
+nunca aparece.
+
+- `--install claude-desktop` e `--install vscode` gravam cada um o seu formato. O
+  do VS Code vai para `.vscode/mcp.json` no diretório atual: uma entrada que
+  nomeia porta e senha pertence ao projeto para o qual o servidor foi iniciado,
+  não a toda janela que o editor abrir.
+- **Instalar passou a ser opt-in.** Foi brevemente o padrão, e era errado: editar
+  a configuração de outro aplicativo é decisão do pesquisador, e permissões de
+  arquivo variam por plataforma de um jeito que nenhum padrão pode presumir.
+- O local só é afirmado para as duas plataformas com build oficial do Claude
+  Desktop. No resto, a entrada é impressa em vez de escrita num caminho chutado, e
+  o `SYNESIS_MCP_CONFIG` sobrepõe em qualquer lugar.
+- Os dois instaladores preservam cada entrada existente e cada chave de topo,
+  fazem backup antes, e recusam em vez de sobrescrever um arquivo que não
+  conseguem interpretar. Um diretório de configuração ausente é reportado, nunca
+  criado — isso configuraria um aplicativo que não está instalado.
+
+### Fixed — a ajuda deixou de descrever o comando
+
+Dois exemplos tinham desandado, um deles quebrado: o `--install` virou opção de
+escolha e o epílogo seguia ilustrando-o sem valor, o que agora falha com "Option
+'--install' requires an argument". O texto com maior chance de ser copiado era
+justamente o que não funcionava mais. O exemplo da senha ainda mandava definir
+`SYNESIS_DB_PASSWORD` para os reinícios sobreviverem, o que a correção acima
+tornou desnecessário.
+
+Os dois estão corrigidos, e **todo exemplo de todo epílogo passa a ser conferido
+contra os parsers reais** por um teste. Esta é a segunda vez que um exemplo do
+`serve` estava errado; uma correção pontual não teria impedido a terceira.
+
+### Fixed — o exemplo do `serve` apontava para o diretório errado
+
+O `synesis-graph serve --help` ilustrava `--db-path ./databases`. Tanto a
+exportação quanto o `serve` acrescentam o nível `databases/` por conta própria,
+então seguir o exemplo faz o servidor procurar em `databases/databases` — e um
+servidor sobre a raiz errada não reclama: ele sobe, registra o endpoint MCP e
+responde toda query sem nenhuma linha.
+
+O exemplo agora passa a mesma raiz usada na exportação, e mostra os dois comandos
+lado a lado para a simetria ficar visível. Um teste tranca isso, porque um exemplo
+é o texto com maior chance de ser copiado literalmente.
+
+O `synesis-graph arcadedb-embedded --help` também passa a apontar o `serve` como
+passo seguinte — exportar um grafo e consultá-lo de um cliente de chat são duas
+metades da mesma tarefa.
+
+### Fixed — um template pode declarar um campo chamado `title` sem quebrar o sync
+
+As listas de propriedades dos índices full-text passam a ser deduplicadas,
+preservando a ordem de primeira ocorrência.
+
+Os dois backends montam o índice de `Source` prefixando as propriedades
+bibliográficas estruturais (`title`, `abstract`) aos campos TEXT SOURCE do
+próprio template. Nada impede um template de declarar um desses nomes, e fazê-lo
+é legítimo — o Quinto_Andar declara `FIELD title TYPE TEXT SCOPE SOURCE` para o
+nome do candidato, o mesmo lugar preenchido a partir de outra origem. O
+resultado era um índice composto nomeando `title` duas vezes.
+
+- **O Neo4j recusava de saída**, com `RepeatedPropertyInCompositeSchema` — e o
+  fazia *depois* de compilar 41.474 itens e sincronizar o grafo, já que a
+  criação dos índices vem por último. A execução inteira falhava no fim, sem
+  nada gravado.
+- **No ArcadeDB a falha era silenciosa**: ele aceita o composto e indexa a mesma
+  coluna duas vezes. Pior, `_declare_fulltext` deriva da mesma lista, de modo
+  que a duplicata chegava a `ProjectContext.fulltext_source_fields` e ensinaria
+  ao consumidor um nome de `SEARCH_INDEX` que não corresponde ao índice
+  realmente criado.
+- A mesma colisão existia no índice de conceitos, onde `search_name` é
+  prefixado a `scalar_fields`.
+- A ordem é preservada, não ordenada: a propriedade estrutural é a primeira
+  ocorrência, e `SEARCH_INDEX` endereça o índice composto pelo nome ordenado
+  completo.
+
+A deduplicação vive num único helper, `core.dedupe_index_props()`, usado pelos
+três pontos de derivação — uma segunda implementação da mesma regra é livre para
+discordar da primeira.
+
 ## [0.9.0] - 2026-08-25
 
 ### Added — as métricas de rede declaram backend e escopo

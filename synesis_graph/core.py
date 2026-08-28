@@ -7,7 +7,7 @@ import json
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -205,6 +205,32 @@ def humanize_concept_name(name: str) -> str:
     the identity every edge resolves against.
     """
     return name.replace("_", " ")
+
+
+def dedupe_index_props(props: Iterable[str]) -> list[str]:
+    """Removes repeated property names from an index list, keeping first order.
+
+    The structural bibliographic props (`title`, `abstract`) are prepended by
+    both backends before the template's own TEXT SOURCE fields, and nothing stops
+    a template from declaring a field with one of those names — Quinto_Andar
+    declares `FIELD title TYPE TEXT SCOPE SOURCE` for the candidate's name, which
+    is legitimate: the same slot, filled from a different source.
+
+    Neo4j rejects the repetition outright (`RepeatedPropertyInCompositeSchema`),
+    which failed the whole sync after a 41k-item compile; ArcadeDB accepts the
+    composite and indexes the column twice. Neither is what the caller meant, and
+    the intent is the same in both: index each property once.
+
+    Order is preserved because the first occurrence is the structural one, and
+    `SEARCH_INDEX` addresses a composite index by its full ordered name.
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for prop in props:
+        if prop not in seen:
+            seen.add(prop)
+            unique.append(prop)
+    return unique
 
 
 def source_field_names(source_fields: Sequence[SourceFieldSpec | str]) -> list[str]:
@@ -1080,7 +1106,9 @@ def compile_project(
         return json_data
 
     corpus_count = len(json_data.get("corpus", []))
-    reporter.info(f"{corpus_count} items compiled")
+    # "coded excerpts" rather than "items": the researcher wrote them one at a
+    # time in the .syn file, and that is the unit they recognise.
+    reporter.info(f"{corpus_count:,} coded excerpts read".replace(",", "."))
 
     (
         scalar_fields,

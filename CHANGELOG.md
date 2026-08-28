@@ -13,6 +13,358 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-27
+
+### Added — the ArcadeDB sync layer is typed against a transport contract
+
+New `ArcadeDBTransport` Protocol names what the sync layer actually needs from a
+connection: `command`, `query`, `begin`, `commit`, `rollback`, and the `database`
+attribute. `backends/arcadedb.py` and `metrics_arcadedb.py` now annotate against
+it instead of the concrete `ArcadeDBClient`.
+
+Nothing changes at runtime — this is a type-level move. What it buys is room for
+a second transport: the in-process embedded engine speaks the same Cypher and the
+same SQL, and with the sync layer typed against the contract, adding it touches
+no query, no schema statement, and none of the eight `_sync_*` functions.
+
+- **Structural typing, so the cost falls on the newcomer.** `ArcadeDBClient`
+  satisfies the Protocol without inheriting from it, without registering, and
+  without importing it. A shared abstract base would have meant changing the HTTP
+  client — in production — to accommodate a backend that does not exist yet.
+- **Deliberately smaller than the client.** `is_ready`, `list_databases`,
+  `create_database` and `close` stay out: they are preflight, setup and teardown,
+  they live in the adapter, and they are exactly where two transports differ (an
+  in-process database has no server to probe and no credential to exercise).
+- `language` stays keyword-with-default rather than following the embedded
+  engine's positional-first signature, so all 20 call sites keep working
+  unchanged.
+- Conformance is pinned by tests that compare the two surfaces mechanically
+  (`inspect.Signature`), not by restating the signatures — a hand-copied
+  expectation drifts as easily as the code. Verified to fail on real drift.
+
+### Added — an in-process ArcadeDB transport (`ArcadeDBEmbeddedClient`)
+
+`arcadedb-embedded` ships the real engine plus a bundled JRE, so a graph can be
+built and queried with nothing installed but `pip` — no Java, no server, no port.
+This class adapts it to `ArcadeDBTransport`, which means the sync layer runs over
+it unchanged: no query rewritten, no schema statement touched, none of the eight
+`_sync_*` functions modified.
+
+It exists to absorb five ways the binding differs from the HTTP client. Each was
+measured against `arcadedb-embedded` 26.8.1, and each is a **silent** failure if
+left to the caller — the code runs, raises nothing, and returns a wrong answer:
+
+- **`language` is the binding's first positional argument.** This class keeps the
+  client's keyword-with-default signature; following the binding would make every
+  unqualified call in the sync layer execute as the wrong language.
+- **A write returns `None`, not an empty result.** The sync layer iterates results
+  directly, so `None` becomes `[]` here rather than a `TypeError` at a call site.
+- **`ResultSet` is single-pass.** Reading it twice yields `[]` the second time,
+  with no error. Results are materialised at this boundary — the only place that
+  knows the cursor is still unread.
+- **Passing `None` as parameters raises `Ambiguous overloads`** from JPype, which
+  cannot resolve the Java overload from a null. The argument is omitted entirely
+  when there are none, so the failure cannot reach a caller. This one would have
+  looked intermittent: it fires only on statements that take no parameters.
+- **The binding raises its own same-named `ArcadeDBError`,** from a different
+  module. Nine `except ArcadeDBError` sites expect this package's class; without
+  translation each would let an engine error escape unhandled, past the code
+  written to report it.
+
+The optional dependency is imported lazily and reported as an actionable
+`ArcadeDBError`, the same pattern the embeddings provider already uses, so the
+other backends keep working when the extra is absent.
+
+### Added — `[arcadedb-embedded]` configuration and the backend name
+
+`ArcadeDBEmbeddedConfig` and the `arcadedb-embedded` backend constant. The
+adapter that consumes them lands next; this is the configuration surface.
+
+- **Its own section, not a reuse of `[arcadedb]`.** Sharing that block would
+  leave `uri`, `user` and `password` sitting in the file, read by nobody — a
+  field that looks honoured but is not is the defect shape this project keeps
+  paying for. A distinct section makes the mode visible in the file itself.
+- **Every field is optional, and so is the section — and the file.** There is no
+  credential to supply and no host to reach, so the defaults already describe a
+  working setup; demanding a file whose every value repeats a default is friction
+  with nothing behind it. Malformed sections are still reported, because those
+  are typos rather than omissions.
+- **`db_path` is the server root, not the database directory.** The database is
+  created at `<db_path>/databases/<project>`, which is where ArcadeDB's server
+  looks for it. Pointing it one level deeper produces the worst failure available
+  here: the server starts, registers its MCP endpoint, reports success, and finds
+  no databases at all — nothing errors, the corpus is simply invisible. The
+  layout is derived by a single method, so whatever writes the graph and whatever
+  serves it cannot drift apart.
+- The default root is `.`, not `./databases`: the root already gains a
+  `databases/` child, and `databases/databases/face85` reads like a bug — which
+  invites the "fix" that lands exactly on the silent failure above.
+- `[arcadedb_embedded]` (underscore) is accepted too, for readers who know
+  `[tool.ruff]`.
+
+### Added — the embedded backend adapter, over a base shared with the HTTP one
+
+`ArcadeDBEmbeddedBackendAdapter` completes the local path: a project now exports
+to a directory, with no server, no port and no Java installed.
+
+- **`_ArcadeDBAdapterBase` holds everything past the connection.** The engine is
+  the same whichever way it is reached, so clearing, syncing, metrics and close
+  are written once. Only `preflight`, `connect` and `prepare_destination` differ,
+  and each is simpler here for the same reason: there is no server in the picture.
+- **The pipeline's two "is this ArcadeDB?" questions now have one answer.** It
+  asks in order to attach the embeddings sidecar and to record the metrics scope
+  caveat, and both apply to either transport — same engine, same whole-graph
+  `algo.*` limitation. Naming both adapters at each site would have put that rule
+  in two places that must be kept in step; no third check was added.
+- **`connect` deliberately does nothing.** The HTTP adapter opens a client there
+  because its target exists independently of the project; an embedded database
+  *is* a directory named after the project, so opening waits for the payload.
+- **`preflight` checks what can actually fail** — that the optional package is
+  installed, and that the root is writable. Both are reported before compilation,
+  which on a 41k-item corpus is the difference between a wasted minute and a
+  wasted hour.
+- `prepare_destination` derives the directory from `ArcadeDBEmbeddedConfig`
+  rather than joining paths itself, so the export and the future serving side
+  cannot disagree about the layout.
+- The HTTP adapter now declares its `client` as the concrete `ArcadeDBClient`:
+  `create_database` is a server operation, absent from the transport contract by
+  design. Narrowing in the subclass keeps that call type-checked without widening
+  the contract for a transport that has no server to send it to.
+
+### Added — `synesis-graph arcadedb-embedded`
+
+The local path is now a command. A project exports to a directory with no server
+running, no port to manage and no Java installed:
+
+```
+synesis-graph arcadedb-embedded --project project.synp
+```
+
+- **`--config` is optional here.** There is no credential to supply and no host
+  to reach, so the defaults describe a working setup; the command runs in a
+  directory with no `config.toml` at all.
+- **`--db-path` is the server root**, and its help says so — the database is
+  created in `<DIR>/databases/<project_name>`. Pointing it straight at a database
+  directory is the mistake that makes the serving side start, report success and
+  find nothing, so the flag documents the layout rather than assuming it is known.
+- **It sits under "Graph Backends" in `--help`**, with the other three: it
+  exports and exits. A long-running command would not belong there, which is
+  exactly why the grouping exists.
+- `--vector-embeddings` and `--rebuild-embeddings` work as on the server backend,
+  and the guard against rebuilding with no fields names
+  `[arcadedb-embedded.embeddings]` — not `[arcadedb]`, which is a different mode.
+
+Backend-agnostic CLI overrides (`cli_overrides`) replace what was an HTML-only
+mechanism. A flag the user did not pass stays `None` and never displaces a
+configured value, so an unused flag cannot silently reset the file.
+
+### Added — `synesis-graph serve`, and the local graph reaches the chat clients
+
+Phase B. The export commands write a graph and exit; this one opens a graph
+already built and keeps it reachable, so Claude Desktop, Claude Code or the
+VSCode extension can ask questions of it:
+
+```
+synesis-graph serve
+```
+
+The engine does most of this itself — `arcadedb-embedded` bundles the real
+ArcadeDB server and auto-discovers its MCP plugin. Three things it does not do
+are why this is a command rather than a snippet to paste:
+
+- **MCP starts disabled.** The embedded distribution ships without the
+  `config/mcp-config.json` the standalone server reads, so the plugin registers
+  and then refuses every call. The setting lives in the running server, not on
+  disk, so enabling it has to happen on **every** start.
+- **Read-only is not the default.** Writes are off unless `--allow-writes` says
+  otherwise: a corpus is months of coding work, and reading it is the use case.
+  Every permission flag is stated rather than inherited, so a future engine
+  default cannot quietly widen what a chat client may do. `allowAdmin` stays off
+  even with `--allow-writes` — administrative calls reach past the corpus to the
+  server itself.
+- **A password must exist and must not be written down.** One is generated per
+  session and printed with the `mcpServers` entry to paste; `SYNESIS_DB_PASSWORD`
+  keeps one across restarts so a client config stays valid. Nothing is written to
+  a project file.
+
+Serving a root with no database under `databases/` is refused, with the export
+command that fixes it. That check is the layout contract seen from the other
+side: a server started over the wrong directory runs happily, registers MCP, and
+answers every query with no rows.
+
+`--help` now groups the commands. Backends export and exit; `serve` publishes and
+stays — a distinction worth showing, since it is what keeps the module's role
+legible as it grows.
+
+### Added — the local backend validated on a real corpus
+
+**Validated against the Quinto_Andar corpus** — 41,474 items, 7,293 concepts, 661
+sources, exported in 113s with no server running. All **16** node and
+relationship counts match the Neo4j Aura export exactly: `Item` 41,474,
+`FROM_SOURCE` 41,474, `MENTIONS` 61,796, `RELATES_TO` 19,126, `GROUPED_BY` 7,293,
+and every taxonomy label and edge besides. `ProjectContext` carries the same
+counts, and the embedded backend additionally declares its full-text capability,
+which the Neo4j one cannot.
+
+On the face85 corpus the two transports were compared directly, and the vectors
+are the deciding detail: the same 210 concepts, the same 49 communities, PageRank
+agreeing to the eighth decimal, and `vectorNeighbors` returning the same
+neighbours in the same order. Stored vectors are byte-identical.
+
+This is the criterion the whole embedded series was written against: the same
+graph, from the same project, with no Java and no database server at any point.
+
+READMEs (EN and PT) document the third backend, when to prefer it over the
+server one, and the `serve` command.
+
+### Changed — the local graph engine now installs with the package
+
+`pip install synesis-graph` brings the in-process ArcadeDB engine. There is no
+extra to remember, and no Java to install: the wheel carries its own JVM.
+
+The audience decided this. "Install the right extra" is one more step to get
+wrong before seeing any result, and the person most likely to get it wrong is the
+one with the fewest tools to diagnose it. ~67 MB is a smaller price than that
+friction. Someone using only Neo4j or HTML now carries weight they do not use —
+a deliberate trade, made in favour of the researcher.
+
+`synesis-graph[arcadedb-embedded]` still resolves, so older instructions keep
+working.
+
+### Changed — the terminal speaks to the researcher, not to the database
+
+Exporting a corpus used to print sixty lines of engine internals — every index
+build, every sub-index split, every page write — with the three lines that
+mattered buried among them. Worse, `WARNI` and `Building index 'Item_0_406270...'`
+read like something had gone wrong.
+
+The engine's logging is now configured down to warnings, and the two unactionable
+JVM startup lines are filtered. Anything else Java says still reaches the
+terminal: a real failure is never swallowed, and that is pinned by a test.
+
+The step labels changed with it, from implementation to intent:
+
+| Before | Now |
+|---|---|
+| `Compiling Project (In-Memory)` | `Reading your project` |
+| `41474 items compiled` | `41.474 coded excerpts read` |
+| `Synchronizing Graph (Transactional)` | `Building the graph` |
+| `Calculating Native Metrics` | `Measuring the graph` |
+| `Calculating Graph Algorithms` | `Finding central concepts and communities` |
+| `Target database: …` | `Graph location: …` |
+
+- The metrics caveat now has **two wordings**: `ProjectContext` keeps the precise
+  one naming `algo.*`, because its reader is a program about to rank concepts by
+  those scores; the terminal gets the plain version, because its reader needs to
+  know only that these numbers are not comparable with a Neo4j export's.
+- A finished export now says **where the graph is and what to do next** — it is a
+  means, not an end, and a researcher left with a directory has no way to guess
+  that `serve` exists.
+- `SUCCESS em 3s` had a stray Portuguese word in an otherwise English interface.
+
+### Fixed — a second `serve` on the same graph failed with HTTP 403
+
+The engine honours `root_password` only while it is creating
+`config/server-users.jsonl`. Every later start reads the stored hash and ignores
+what it is handed — silently. `serve` generated a fresh password per session, so
+the first run worked and every one after it authenticated against a credential
+nobody held: the server started, reported success, and answered
+`User/Password not valid`.
+
+- The password is now **generated once and remembered** beside the server's own
+  state, so restarts keep working with no variable to set. `SYNESIS_DB_PASSWORD`
+  remains for choosing your own.
+- A credential already stored but **unknown to everyone** — the state left by any
+  earlier version — is **reset rather than reported**. It guards nothing: a local
+  server, reachable only from this machine, whose password exists because the
+  engine demands one. Refusing would hand over a chore whose only answer is yes.
+  The old file is set aside as `.superseded`, never deleted, and `databases/` is
+  not touched.
+- A password under the engine's 8-character minimum is now refused **before**
+  starting, naming the variable that set it.
+- A failure to start no longer appends "is the port in use?" to an unrelated
+  engine message. The guess is offered only when the error mentions the port.
+
+### Changed — `--install` names its client, and VS Code is supported properly
+
+VS Code reads a different format: `servers` rather than `mcpServers`, HTTP
+directly with a `headers` object, and no `npx`/`mcp-remote` bridge. The previous
+snippet claimed to serve "Claude Desktop, Claude Code or the VSCode extension"
+while emitting a shape VS Code ignores in silence — no error, the server simply
+never appears.
+
+- `--install claude-desktop` and `--install vscode` each write their own format.
+  VS Code's goes to `.vscode/mcp.json` in the working directory: an entry naming
+  a port and a password belongs to the project it was started for, not to every
+  window the editor opens.
+- **Installing is now opt-in.** It was briefly the default, which was wrong:
+  editing another application's configuration is the researcher's decision, and
+  file permissions vary by platform in ways no default can assume.
+- The location is claimed only for the two platforms with an official Claude
+  Desktop build. Elsewhere the entry is printed instead of written to a guessed
+  path, and `SYNESIS_MCP_CONFIG` overrides everywhere.
+- Both installers preserve every existing entry and every top-level key, back the
+  file up first, and refuse rather than overwrite a file they cannot parse. A
+  missing config directory is reported, never created — that would configure an
+  application that is not installed.
+
+### Fixed — the help stopped describing the command
+
+Two examples had drifted into being wrong, one of them broken: `--install`
+became a choice option and the epilog kept illustrating it bare, which now fails
+with "Option '--install' requires an argument". The text most likely to be copied
+was the text that no longer worked. The password example still told researchers
+to set `SYNESIS_DB_PASSWORD` for restarts to survive, which the fix above made
+unnecessary.
+
+Both are corrected, and **every example in every epilog is now checked against
+the real parsers** by a test. This is the second time a `serve` example was
+wrong; a one-off correction would not have prevented the third.
+
+### Fixed — the `serve` example pointed at the wrong directory
+
+`synesis-graph serve --help` illustrated `--db-path ./databases`. Both the export
+and `serve` add the `databases/` level themselves, so following the example makes
+the server look in `databases/databases` — and a server over the wrong root does
+not complain: it starts, registers its MCP endpoint, and answers every query with
+no rows.
+
+The example now passes the same root the export used, and shows the two commands
+side by side so the symmetry is visible. A test pins it, because an example is
+the likeliest text to be copied verbatim.
+
+`synesis-graph arcadedb-embedded --help` now also points at `serve` as the next
+step — exporting a graph and querying it from a chat client are two halves of the
+same task.
+
+### Fixed — a template may declare a field named `title` without breaking the sync
+
+Full-text index property lists are now deduplicated, keeping first-seen order.
+
+Both backends build the `Source` index by prepending the structural
+bibliographic props (`title`, `abstract`) to the template's own TEXT SOURCE
+fields. Nothing stops a template from declaring one of those names, and doing so
+is legitimate — Quinto_Andar declares `FIELD title TYPE TEXT SCOPE SOURCE` for
+the candidate's name, the same slot filled from a different source. The result
+was a composite index naming `title` twice.
+
+- **Neo4j rejected it outright** with `RepeatedPropertyInCompositeSchema` — and
+  did so *after* compiling 41,474 items and synchronising the graph, since index
+  creation comes last. The whole run failed at the end with nothing written.
+- **ArcadeDB failed silently**: it accepts the composite and indexes the same
+  column twice. Worse, `_declare_fulltext` derives from the same list, so the
+  duplicate reached `ProjectContext.fulltext_source_fields` and would teach a
+  consumer a `SEARCH_INDEX` name that does not match the index actually created.
+- The same collision existed on the concept index, where `search_name` is
+  prepended to `scalar_fields`.
+- Order is preserved rather than sorted: the structural prop is the first
+  occurrence, and `SEARCH_INDEX` addresses a composite index by its full ordered
+  name.
+
+Deduplication lives in one helper, `core.dedupe_index_props()`, used by all three
+derivation points — a second implementation of the rule is free to disagree with
+the first.
+
 ## [0.9.0] - 2026-08-25
 
 ### Added — network metrics declare their backend and scope

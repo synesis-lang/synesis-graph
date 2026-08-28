@@ -56,7 +56,7 @@ def compute_metrics(session: Any, payload: GraphPayload, reporter: TaskReporter)
     graph_fields = payload.graph_fields
 
     # 1. Native metrics (always run)
-    with reporter.step("Calculating Native Metrics"):
+    with reporter.step("Measuring the graph"):
         _compute_native_concept_metrics(session, concept_label)
         _compute_native_taxonomy_metrics(session, concept_label, graph_fields)
         _compute_native_source_metrics(session, concept_label)
@@ -72,7 +72,7 @@ def compute_metrics(session: Any, payload: GraphPayload, reporter: TaskReporter)
     strategy = _get_graph_strategy(payload)
     reporter.info(f"GDS graph strategy: {strategy}")
 
-    with reporter.step("Calculating GDS Metrics"):
+    with reporter.step("Finding central concepts and communities"):
         try:
             _compute_gds_metrics(session, payload, strategy, reporter)
         except Exception as e:

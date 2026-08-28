@@ -20,6 +20,7 @@ if str(_repo_root) not in sys.path:
 
 from synesis_graph.config import (  # noqa: E402,F401
     BACKEND_ARCADEDB,
+    BACKEND_ARCADEDB_EMBEDDED,
     BACKEND_HTML,
     BACKEND_NEO4J,
     SUPPORTED_BACKENDS,

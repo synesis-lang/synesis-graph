@@ -25,8 +25,14 @@ from synesis_graph.sanitize import sanitize_database_name
 
 BACKEND_NEO4J = "neo4j"
 BACKEND_ARCADEDB = "arcadedb"
+BACKEND_ARCADEDB_EMBEDDED = "arcadedb-embedded"
 BACKEND_HTML = "html"
-SUPPORTED_BACKENDS = (BACKEND_NEO4J, BACKEND_ARCADEDB, BACKEND_HTML)
+SUPPORTED_BACKENDS = (
+    BACKEND_NEO4J,
+    BACKEND_ARCADEDB,
+    BACKEND_ARCADEDB_EMBEDDED,
+    BACKEND_HTML,
+)
 
 
 # ============================================================================
@@ -80,6 +86,56 @@ class ArcadeDBConfig:
 
 
 @dataclass
+class ArcadeDBEmbeddedConfig:
+    """In-process ArcadeDB configuration: a directory, not a connection.
+
+    A separate section from `[arcadedb]` on purpose. Reusing that one would mean
+    `uri`, `user` and `password` sit in the file and are silently ignored — and a
+    field that looks honoured but is not is the exact defect this ecosystem keeps
+    paying for. A distinct `[arcadedb-embedded]` makes the mode visible in the
+    file itself.
+
+    ⚠️ `db_path` is the **server root**, not the database directory. The database
+    is created at `<db_path>/databases/<project_name>`, because that is where
+    ArcadeDB's server looks for it: `create_server(root_path=X)` scans
+    `X/databases/`. Writing the database straight into `<db_path>/<project>`
+    produces the worst kind of failure — the server starts, registers its MCP
+    endpoint, reports success, and finds no databases at all. Nothing errors;
+    the corpus is simply invisible.
+
+    That makes this field a contract between the two phases: whatever writes the
+    graph and whatever serves it must agree on the layout, so the rule lives here
+    rather than in either one of them.
+    """
+
+    #: Server root. The default keeps the graph beside the project, like the HTML
+    #: backend's `output_path`: a `.db` is a research artefact, not a cache — it
+    #: cannot be regenerated without recompiling, so it does not belong under
+    #: `~/.cache`.
+    #:
+    #: `.` and not `./databases`: the root already gets a `databases/` child (see
+    #: `database_dir`), so naming the root that way yields `databases/databases/…`
+    #: — a path that reads like a mistake and invites someone to "fix" it by
+    #: pointing the root one level deeper, which is exactly the silent failure
+    #: this class documents.
+    db_path: str = "."
+    fulltext_analyzer: str = DEFAULT_ARCADEDB_ANALYZER
+    # Same rationale as ArcadeDBConfig: the model is per project because a
+    # Portuguese corpus and an English one have different requirements, and that
+    # is a research decision rather than a code one.
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embedding_fields: list[str] = field(default_factory=list)
+
+    def database_dir(self, project_name: str) -> Path:
+        """Where the database for `project_name` lives, under the server root.
+
+        One derivation, used by whatever creates the database and by whatever
+        serves it — the two cannot drift into disagreeing about the layout.
+        """
+        return Path(self.db_path) / "databases" / project_name
+
+
+@dataclass
 class HTMLConfig:
     """HTML graph output configuration."""
 
@@ -92,7 +148,7 @@ class HTMLConfig:
     include_isolated: bool = True
 
 
-PipelineConfig = Neo4jConfig | ArcadeDBConfig | HTMLConfig
+PipelineConfig = Neo4jConfig | ArcadeDBConfig | ArcadeDBEmbeddedConfig | HTMLConfig
 
 
 def _describe_available_sections(parsed_cfg: dict[str, Any]) -> str:
@@ -233,6 +289,71 @@ def _load_arcadedb_config(parsed_cfg: dict[str, Any]) -> ArcadeDBConfig | Connec
         )
 
 
+def _load_arcadedb_embedded_config(
+    parsed_cfg: dict[str, Any],
+) -> ArcadeDBEmbeddedConfig | ConnectionError:
+    """Loads the [arcadedb-embedded] block, all of whose fields are optional.
+
+    Unlike `[arcadedb]`, an absent section is not an error: there is no
+    credential to demand and no host to reach, so the defaults describe a
+    complete, working setup. Requiring the section would only make the researcher
+    write down values identical to the defaults.
+
+    What *is* rejected is a section of the wrong shape — a scalar where a table
+    belongs, or a string where a list of fields belongs. Those are typos, and
+    reporting them beats quietly ignoring the line.
+    """
+    cfg = parsed_cfg.get("arcadedb-embedded")
+    if cfg is None:
+        # Tolerate the TOML-idiomatic spelling too: a reader who knows
+        # `[tool.ruff]` will reasonably try `[arcadedb_embedded]`.
+        cfg = parsed_cfg.get("arcadedb_embedded")
+    if cfg is None:
+        return ArcadeDBEmbeddedConfig()
+
+    if not isinstance(cfg, dict):
+        return ConnectionError(
+            message="Error reading embedded ArcadeDB configuration",
+            stage="config",
+            details="[arcadedb-embedded] must be a table.",
+        )
+
+    emb = cfg.get("embeddings") or {}
+    if not isinstance(emb, dict):
+        return ConnectionError(
+            message="Error reading embedded ArcadeDB configuration",
+            stage="config",
+            details="[arcadedb-embedded.embeddings] must be a table.",
+        )
+
+    raw_fields = emb.get("fields") or []
+    if isinstance(raw_fields, str):
+        # Same tolerance as the [arcadedb] loader: a bare string is meant as one
+        # field name, and iterating its characters would report "no such field: o".
+        raw_fields = [raw_fields]
+    if not isinstance(raw_fields, list):
+        return ConnectionError(
+            message="Error reading embedded ArcadeDB configuration",
+            stage="config",
+            details="[arcadedb-embedded.embeddings].fields must be a list of field names.",
+        )
+
+    defaults = ArcadeDBEmbeddedConfig()
+    try:
+        return ArcadeDBEmbeddedConfig(
+            db_path=str(cfg.get("db_path") or defaults.db_path),
+            fulltext_analyzer=str(cfg.get("fulltext_analyzer") or DEFAULT_ARCADEDB_ANALYZER),
+            embedding_model=str(emb.get("model") or DEFAULT_EMBEDDING_MODEL),
+            embedding_fields=[str(f) for f in raw_fields],
+        )
+    except Exception as e:
+        return ConnectionError(
+            message="Error reading embedded ArcadeDB configuration",
+            stage="config",
+            details=str(e),
+        )
+
+
 def _load_html_config(parsed_cfg: dict[str, Any]) -> HTMLConfig:
     """Loads HTML configuration block with defaults (all fields optional)."""
     _defaults = HTMLConfig()
@@ -260,6 +381,12 @@ def load_config(config_path: Path, backend: str) -> PipelineConfig | ConnectionE
             return HTMLConfig()
 
     if not config_path.exists():
+        # The embedded backend needs no credential and no host, so its defaults
+        # already describe a working setup — demanding a file whose every value
+        # would repeat a default is friction with nothing behind it. The other
+        # database backends genuinely cannot proceed without one.
+        if backend == BACKEND_ARCADEDB_EMBEDDED:
+            return ArcadeDBEmbeddedConfig()
         return ConnectionError(
             message="Configuration file not found", stage="config", details=str(config_path)
         )
@@ -279,6 +406,9 @@ def load_config(config_path: Path, backend: str) -> PipelineConfig | ConnectionE
     if backend == BACKEND_ARCADEDB:
         return _load_arcadedb_config(parsed_cfg)
 
+    if backend == BACKEND_ARCADEDB_EMBEDDED:
+        return _load_arcadedb_embedded_config(parsed_cfg)
+
     return ConnectionError(
         message="Unsupported backend in configuration loader",
         stage="backend",
@@ -291,6 +421,8 @@ def validate_backend_config(config: PipelineConfig, backend: str) -> ConnectionE
     if backend == BACKEND_NEO4J and isinstance(config, Neo4jConfig):
         return None
     if backend == BACKEND_ARCADEDB and isinstance(config, ArcadeDBConfig):
+        return None
+    if backend == BACKEND_ARCADEDB_EMBEDDED and isinstance(config, ArcadeDBEmbeddedConfig):
         return None
     if backend == BACKEND_HTML and isinstance(config, HTMLConfig):
         return None

@@ -8,16 +8,20 @@ from typing import Any
 
 from synesis_graph.backends.base import (
     ArcadeDBBackendAdapter,
+    ArcadeDBEmbeddedBackendAdapter,
     BackendAdapter,
     Neo4jBackendAdapter,
+    _ArcadeDBAdapterBase,
 )
 from synesis_graph.backends.html import HTMLBackendAdapter
 from synesis_graph.config import (
     BACKEND_ARCADEDB,
+    BACKEND_ARCADEDB_EMBEDDED,
     BACKEND_HTML,
     BACKEND_NEO4J,
     SUPPORTED_BACKENDS,
     ArcadeDBConfig,
+    ArcadeDBEmbeddedConfig,
     HTMLConfig,
     Neo4jConfig,
     PipelineConfig,
@@ -80,10 +84,22 @@ def build_backend_adapter(
             )
         return ArcadeDBBackendAdapter(config)
 
+    if backend == BACKEND_ARCADEDB_EMBEDDED:
+        if not isinstance(config, ArcadeDBEmbeddedConfig):
+            return ConnectionError(
+                message="Internal configuration type mismatch",
+                stage="config",
+                details="Expected ArcadeDBEmbeddedConfig for backend 'arcadedb-embedded'.",
+            )
+        return ArcadeDBEmbeddedBackendAdapter(config)
+
     return ConnectionError(
         message="Unsupported backend",
         stage="backend",
-        details=f"Supported backends: {', '.join(SUPPORTED_BACKENDS)}",
+        details=(
+            f"Supported backends: {', '.join(SUPPORTED_BACKENDS)}. "
+            f"'{backend}' is configurable but has no adapter yet."
+        ),
     )
 
 
@@ -202,6 +218,7 @@ def run_pipeline(
     reporter: TaskReporter,
     backend: str = BACKEND_NEO4J,
     html_options: dict[str, Any] | None = None,
+    cli_overrides: dict[str, Any] | None = None,
     json_path: Path | None = None,
     database: str | None = None,
     extra_projects: list[Path] | None = None,
@@ -216,6 +233,10 @@ def run_pipeline(
         config_path: Path to config.toml
         reporter: Reporter for visual feedback
         html_options: Optional CLI overrides for the HTML backend (keys match HTMLConfig fields)
+        cli_overrides: Optional CLI overrides for any backend; keys naming a field
+            of the loaded config replace it. A `None` value means "not given on
+            the command line", so the config file keeps precedence over an
+            unused flag.
         json_path: Path to pre-compiled Synesis JSON export (alternative to project_path)
         database: when set, overrides payload.project_name — this names the Neo4j
             database (sanitized) and the HTML graph title. It is the intended way
@@ -261,7 +282,7 @@ def run_pipeline(
         )
 
     # 2. Configuration
-    with reporter.step("Loading Configuration"):
+    with reporter.step("Reading settings"):
         config_result = load_config(config_path, backend)
         if isinstance(config_result, ConnectionError):
             return PipelineResult(success=False, error=config_result)
@@ -271,6 +292,13 @@ def run_pipeline(
             for k, v in html_options.items():
                 if v is not None and hasattr(config, k):
                     setattr(config, k, v)
+
+        # Backend-agnostic flag overrides. Same rule as above: only a value the
+        # user actually passed displaces the file, so an unused flag is not a
+        # silent way of resetting a configured value to its default.
+        for k, v in (cli_overrides or {}).items():
+            if v is not None and hasattr(config, k):
+                setattr(config, k, v)
 
         if database and isinstance(config, (Neo4jConfig, ArcadeDBConfig)):
             config.database = database
@@ -313,7 +341,7 @@ def run_pipeline(
         def load_fn():
             return load_json_project(json_path, reporter)
     else:
-        step_label = "Compiling Project (In-Memory)"
+        step_label = "Reading your project"
 
         def load_fn():
             return compile_project(project_path, reporter)
@@ -336,7 +364,7 @@ def run_pipeline(
 
     # 3b. Embeddings, when asked for. Runs before the sync so a validation error
     # (an unknown field name) costs nothing: the database is untouched.
-    if backend == BACKEND_ARCADEDB and isinstance(config, ArcadeDBConfig):
+    if isinstance(config, (ArcadeDBConfig, ArcadeDBEmbeddedConfig)):
         fields = vector_embeddings or config.embedding_fields
         if fields:
             from synesis_graph.embeddings_provider import prepare_embeddings
@@ -354,7 +382,7 @@ def run_pipeline(
                 return PipelineResult(success=False, error=sidecar)
             # Vectors are ArcadeDB-only, so the sidecar rides on that adapter
             # rather than on the BackendAdapter contract every backend shares.
-            if isinstance(adapter, ArcadeDBBackendAdapter):
+            if isinstance(adapter, _ArcadeDBAdapterBase):
                 adapter.embeddings = sidecar
 
                 # Declare the capability on the context, so a client learns from
@@ -375,7 +403,7 @@ def run_pipeline(
     # it never reaches the graph, and without it a consumer ranking concepts by
     # PageRank cannot tell that ArcadeDB's score includes edges to Items, Sources
     # and taxonomy nodes.
-    if isinstance(adapter, ArcadeDBBackendAdapter):
+    if isinstance(adapter, _ArcadeDBAdapterBase):
         declare_metrics_provenance(
             payload.project_context, "arcadedb", "whole_graph", ARCADEDB_SCOPE_NOTE
         )

@@ -255,3 +255,48 @@ def test_indexes_are_dropped_before_creation(payload_factory):
 
     for name in ("concept_search", "item_search"):
         assert _at(f"DROP INDEX {name}") < _at(f"CREATE FULLTEXT INDEX {name}")
+
+
+# ---------------------------------------------------------------------------
+# A template may declare a field named like a structural bibliographic prop
+# ---------------------------------------------------------------------------
+
+
+def test_source_index_lists_a_repeated_property_once(payload_factory):
+    """`title` is prepended structurally AND declarable by the template.
+
+    Quinto_Andar declares `FIELD title TYPE TEXT SCOPE SOURCE` for the candidate's
+    name. Neo4j rejects the resulting composite index with
+    `RepeatedPropertyInCompositeSchema`, which failed the sync after a 41k-item
+    compile.
+    """
+    payload = payload_factory(
+        source_fields=[
+            SourceFieldSpec("title", "TEXT"),
+            SourceFieldSpec("headline", "TEXT"),
+        ]
+    )
+    session = FakeSession()
+
+    _create_search_indexes(session, payload)
+
+    (source_idx,) = [s for s in session.indexes() if "source_search" in s]
+    props = source_idx.split("ON EACH [")[1].split("]")[0]
+    names = [p.strip() for p in props.split(",")]
+    assert names.count("s.title") == 1
+    assert len(names) == len(set(names))
+    assert "s.headline" in names
+
+
+def test_concept_index_lists_a_repeated_property_once(payload_factory):
+    """`search_name` is prepended; a template declaring it must not double it."""
+    payload = payload_factory(scalar_fields=["search_name", "ontology_description"])
+    session = FakeSession()
+
+    _create_search_indexes(session, payload)
+
+    concept_idx = next(s for s in session.indexes() if "concept_search" in s)
+    props = concept_idx.split("ON EACH [")[1].split("]")[0]
+    names = [p.strip() for p in props.split(",")]
+    assert names.count("c.search_name") == 1
+    assert len(names) == len(set(names))

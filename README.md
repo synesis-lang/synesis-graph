@@ -14,19 +14,30 @@ Three backends ship today — **Neo4j** and **ArcadeDB** (property graphs) and *
 
 ### Choosing a backend
 
-| | Neo4j | ArcadeDB | HTML |
-|---|---|---|---|
-| Protocol | BOLT (`bolt://`, port 7687) | HTTP/JSON (`http://`, port 2480) | — |
-| Python dependency | `neo4j` driver (extra) | none (stdlib only) | none |
-| Server setup | database server | database server | none |
-| Graph algorithms | GDS plugin required | built in (`algo.*`) | — |
-| Full-text search | Lucene index | Lucene index with BM25 | — |
-| License | GPL/commercial | Apache 2.0 | — |
+| | Neo4j | ArcadeDB | ArcadeDB embedded | HTML |
+|---|---|---|---|---|
+| Protocol | BOLT (`bolt://`, port 7687) | HTTP/JSON (`http://`, port 2480) | in-process | — |
+| Extra to install | `neo4j` driver | none | none | none |
+| Server setup | database server | database server | **none** | none |
+| Java required | yes (server) | yes (server) | **no** (JVM bundled) | — |
+| Shared between people | yes | yes | no (single process) | — |
+| Graph algorithms | GDS plugin required | built in (`algo.*`) | built in (`algo.*`) | — |
+| Full-text search | Lucene index | Lucene index with BM25 | Lucene index with BM25 | — |
+| License | GPL/commercial | Apache 2.0 | Apache 2.0 | — |
 
-Both database backends produce the **same graph** from the same project: on the
-FACE/UFMG corpus every structural count matches (concepts, items, sources and all
-relationship types). They differ in how the advanced metrics are scoped — see
+All three database backends produce the **same graph** from the same project. On
+the FACE/UFMG corpus every structural count matches between Neo4j and ArcadeDB;
+on the Quinto_Andar corpus (41,474 items, 7,293 concepts, 661 sources) the
+embedded backend matches the Neo4j Aura export on all 16 node and relationship
+counts. They differ in how the advanced metrics are scoped — see
 [Graph Metrics](#graph-metrics).
+
+**`arcadedb` or `arcadedb-embedded`?** Same engine, different delivery. Use the
+server backend when several people share one graph, or when something remote has
+to reach it. Use the embedded one to work alone: there is nothing to install
+beyond `pip`, nothing to start before working, and the graph is a directory you
+can copy or delete. Phase B below turns that directory into something a chat
+client can query, still without a server to administer.
 
 ---
 
@@ -385,7 +396,8 @@ cd synesis-graph
 # Install (editable) with the graph backends you need
 pip install -e ".[neo4j]"
 
-# The ArcadeDB and HTML backends need no extra — they use only the standard library
+# Everything except Neo4j works out of the box — including the local graph
+# engine, which brings its own Java. Nothing else to install.
 pip install -e .
 ```
 
@@ -396,7 +408,7 @@ pip install -e .
 | synesis | 0.11.0 | — | ≥3.10 |
 | synesis-coder | 0.8.0 | ≥0.10.0 | ≥3.10 |
 | synesis-lsp | 0.22.0 | ≥0.10.0 | ≥3.10 |
-| synesis-graph | 0.6.0 | ≥0.10.0 | ≥3.10 |
+| synesis-graph | 0.10.0 | ≥0.10.0 | ≥3.10 |
 
 ### GDS Plugin (Optional)
 
@@ -444,6 +456,9 @@ synesis-graph neo4j --project ./my-project/analysis.synp
 # Sync to ArcadeDB
 synesis-graph arcadedb --project ./my-project/analysis.synp
 
+# Sync to a local ArcadeDB database — no server, no port, no Java
+synesis-graph arcadedb-embedded --project ./my-project/analysis.synp
+
 # Render a self-contained interactive HTML graph
 synesis-graph html --project ./my-project/analysis.synp --output graph.html
 
@@ -459,6 +474,35 @@ synesis-graph --help
 4. **Synchronization:** Data is injected (Concepts, Citations, Sources, Relationships).
 5. **Native Metrics:** Calculated via pure Cypher.
 6. **Advanced Metrics:** GDS on Neo4j (with a warning if the plugin is absent), built-in `algo.*` on ArcadeDB (always available).
+
+---
+
+## Asking the Graph Questions (`serve`)
+
+An exported graph is a directory. `serve` publishes it over
+[MCP](https://modelcontextprotocol.io), so Claude Desktop, Claude Code or the
+VSCode extension can query the corpus in natural language:
+
+```bash
+synesis-graph serve                       # publishes ./databases, Ctrl+C stops
+synesis-graph serve --db-path ./graphs    # a root exported elsewhere
+```
+
+The command prints the `mcpServers` entry to paste into the chat client's
+configuration. Three things it handles that the engine does not:
+
+- **MCP starts disabled** in the embedded distribution, and the setting lives in
+  the running server rather than on disk — so it is enabled on every start.
+- **Writes are off** unless `--allow-writes` says otherwise. A corpus is months
+  of coding work, and reading it is the use case. Administrative operations stay
+  blocked either way.
+- **The password is generated per session and printed, never written to a file.**
+  Set `SYNESIS_DB_PASSWORD` to keep one across restarts so the client
+  configuration stays valid.
+
+Serving a root with no database under `databases/` is refused rather than
+started: a server over the wrong directory runs happily and answers every query
+with no rows.
 
 ---
 

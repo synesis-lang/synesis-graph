@@ -17,7 +17,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from synesis_graph.arcadedb_client import ArcadeDBClient, ArcadeDBError
+from synesis_graph.arcadedb_client import ArcadeDBError
+from synesis_graph.arcadedb_transport import ArcadeDBTransport
 from synesis_graph.core import GraphPayload
 from synesis_graph.metrics import (
     _compute_native_concept_metrics,
@@ -31,22 +32,35 @@ logger = logging.getLogger("synesis2graph")
 
 # Why the scores differ from Neo4j's, in one place so it can be quoted in the CLI,
 # the CHANGELOG and the README without drifting.
+#: Written into `ProjectContext`, where the audience is a program (or an
+#: assistant) about to rank concepts by these scores and needing to know what
+#: they actually measure. Precision matters more than brevity here.
 SCOPE_NOTE = (
     "ArcadeDB's algo.* procedures run over the whole graph and accept no scope "
     "filter, while Neo4j's GDS projects only the concept subgraph. Scores therefore "
     "reflect Item/Source/taxonomy edges too and are not directly comparable."
 )
 
+#: The same caveat for the terminal, where the audience is the researcher who
+#: just ran the command. They do not need to know what `algo.*` is; they need to
+#: know that these numbers describe this graph and should not be compared with
+#: numbers from the Neo4j export of the same project.
+SCOPE_NOTE_SHORT = (
+    "Centrality here counts every connection in the graph, including those to "
+    "excerpts and sources. Numbers from a Neo4j export of the same project are "
+    "calculated differently and are not directly comparable."
+)
+
 
 class _CypherRunner:
-    """Adapts ArcadeDBClient to the `session.run(query, **params)` interface.
+    """Adapts an ArcadeDBTransport to the `session.run(query, **params)` interface.
 
     The native metric functions were written against a Neo4j session and only call
     `.run()`, so dressing the client in that shape reuses them instead of copying
     their Cypher.
     """
 
-    def __init__(self, client: ArcadeDBClient):
+    def __init__(self, client: ArcadeDBTransport):
         self._client = client
 
     def run(self, query: str, **params: Any) -> list[dict[str, Any]]:
@@ -54,7 +68,7 @@ class _CypherRunner:
 
 
 def compute_metrics(
-    client: ArcadeDBClient, payload: GraphPayload, reporter: TaskReporter
+    client: ArcadeDBTransport, payload: GraphPayload, reporter: TaskReporter
 ) -> None:
     """Calculates and persists graph metrics.
 
@@ -68,12 +82,12 @@ def compute_metrics(
 
     session = _CypherRunner(client)
 
-    with reporter.step("Calculating Native Metrics"):
+    with reporter.step("Measuring the graph"):
         _compute_native_concept_metrics(session, concept_label)
         _compute_native_taxonomy_metrics(session, concept_label, payload.graph_fields)
         _compute_native_source_metrics(session, concept_label)
 
-    with reporter.step("Calculating Graph Algorithms"):
+    with reporter.step("Finding central concepts and communities"):
         for label, run in (
             ("PageRank", _run_pagerank),
             ("Betweenness", _run_betweenness),
@@ -85,19 +99,19 @@ def compute_metrics(
             except ArcadeDBError as e:
                 reporter.warning(f"{label} failed: {e}")
 
-    reporter.info(SCOPE_NOTE)
+    reporter.info(SCOPE_NOTE_SHORT)
 
 
 # ---------------------------------------------------------------------------
 # Advanced metrics (algo.* — no plugin required)
 # ---------------------------------------------------------------------------
-def _run_pagerank(client: ArcadeDBClient, concept_label: str) -> int:
+def _run_pagerank(client: ArcadeDBTransport, concept_label: str) -> int:
     return _run_algorithm(
         client, concept_label, "CALL algo.pagerank() YIELD node, score", "score", "pagerank"
     )
 
 
-def _run_betweenness(client: ArcadeDBClient, concept_label: str) -> int:
+def _run_betweenness(client: ArcadeDBTransport, concept_label: str) -> int:
     return _run_algorithm(
         client,
         concept_label,
@@ -107,7 +121,7 @@ def _run_betweenness(client: ArcadeDBClient, concept_label: str) -> int:
     )
 
 
-def _run_louvain(client: ArcadeDBClient, concept_label: str) -> int:
+def _run_louvain(client: ArcadeDBTransport, concept_label: str) -> int:
     return _run_algorithm(
         client,
         concept_label,
@@ -118,7 +132,7 @@ def _run_louvain(client: ArcadeDBClient, concept_label: str) -> int:
 
 
 def _run_algorithm(
-    client: ArcadeDBClient,
+    client: ArcadeDBTransport,
     concept_label: str,
     call: str,
     yield_field: str,
@@ -134,7 +148,7 @@ def _run_algorithm(
 
 
 def _persist_scores(
-    client: ArcadeDBClient,
+    client: ArcadeDBTransport,
     concept_label: str,
     rows: list[dict[str, Any]],
     property_name: str,

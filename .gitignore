@@ -54,6 +54,20 @@ htmlcov/
 *.swp
 *.swo
 
+# ArcadeDB embedded writes its engine log next to the working directory,
+# so running the test suite creates this. Not an artefact anyone edits.
+log/
+
+# State written by `synesis-graph serve` and the embedded backend when they are
+# run from inside a checkout: the graph itself, the engine's server users, and
+# the generated password. `config/synesis-server-password` is plaintext by
+# necessity — a Basic header needs the original — so it must never be committed.
+databases/
+backups/
+config/server-users.jsonl*
+config/synesis-server-password
+config/mcp-config.json
+
 # OS
 .DS_Store
 Thumbs.db

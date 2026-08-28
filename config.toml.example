@@ -102,6 +102,27 @@ password = "CHANGE_ME"
 # model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 # fields = ["ontology_description", "topic"]
 
+[arcadedb-embedded]
+# In-process ArcadeDB: same engine as [arcadedb], no server to install or start.
+# The `arcadedb-embedded` package bundles its own JRE, so no Java is required.
+#
+# Every field here is optional, and the whole section may be omitted — unlike
+# [arcadedb], there is no credential to supply and no host to reach.
+#
+# db_path: The SERVER ROOT, not the database directory. The database is created
+#          at <db_path>/databases/<project_name>, which is where ArcadeDB's
+#          server looks for it. Pointing this straight at a database directory
+#          makes the server start normally and find nothing — no error, no data.
+# fulltext_analyzer: Same values as [arcadedb] (Lucene class or short name).
+
+# db_path = "."          # -> ./databases/<project_name>
+# fulltext_analyzer = "brazilian"
+
+# [arcadedb-embedded.embeddings]
+# Same meaning as [arcadedb.embeddings]; see that section for the details.
+# model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# fields = ["ontology_description", "topic"]
+
 [html]
 # HTML graph output settings (all fields optional — sensible defaults apply)
 #

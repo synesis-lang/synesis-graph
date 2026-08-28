@@ -15,7 +15,7 @@ import pytest
 from synesis_graph.arcadedb_client import ArcadeDBClient, ArcadeDBError
 from synesis_graph.backends.arcadedb import sync_to_arcadedb
 from synesis_graph.metrics_arcadedb import (
-    SCOPE_NOTE,
+    SCOPE_NOTE_SHORT,
     _persist_scores,
     compute_metrics,
 )
@@ -177,9 +177,19 @@ class TestComputeMetrics:
         assert "gds." not in " ".join(s for s, _ in client.statements)
 
     def test_reports_the_scope_caveat(self, minimal_payload):
+        """The terminal gets the plain-language version, not the graph's.
+
+        Two audiences, two texts: `SCOPE_NOTE` goes into `ProjectContext` for a
+        program about to rank concepts by these scores, and needs to name
+        `algo.*` precisely. The researcher reading the terminal needs to know
+        only that these numbers are not comparable with a Neo4j export's.
+        """
         reporter = DummyReporter()
         compute_metrics(self._client(), minimal_payload, reporter)
-        assert SCOPE_NOTE in reporter.texts()
+
+        texts = reporter.texts()
+        assert SCOPE_NOTE_SHORT in texts
+        assert "algo.*" not in texts, "jargon belongs in the graph, not the terminal"
 
     def test_one_failing_algorithm_does_not_stop_the_others(self, minimal_payload):
         client = self._client()

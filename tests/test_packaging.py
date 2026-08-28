@@ -158,3 +158,48 @@ class TestVersionConsistency:
         """Publicar uma versao ausente do CHANGELOG deixa o historico mentindo."""
         changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         assert f"## [{_declared_version()}]" in changelog
+
+
+class TestOptionalExtras:
+    """Os extras sao citados em oito mensagens de erro do codigo.
+
+    Cada uma manda o pesquisador rodar `pip install "synesis-graph[<extra>]"`.
+    Um nome que nao exista no pyproject transforma a mensagem acionavel numa
+    pista falsa, e o erro so aparece na maquina de quem ja estava travado.
+    """
+
+    def _extras(self) -> dict:
+        import tomllib
+
+        data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        return data["project"]["optional-dependencies"]
+
+    def test_every_extra_named_in_an_error_message_exists(self):
+        """Fonte da verdade: o proprio codigo, nao uma lista mantida a mao."""
+        import re
+
+        declared = set(self._extras())
+        referenced = set()
+        for path in (REPO_ROOT / "synesis_graph").rglob("*.py"):
+            for match in re.finditer(
+                r"synesis-graph\[([a-z0-9_-]+)\]", path.read_text(encoding="utf-8")
+            ):
+                referenced.add(match.group(1))
+
+        assert referenced, "nenhuma mensagem encontrada — o regex quebrou?"
+        assert referenced <= declared, f"extras citados e inexistentes: {referenced - declared}"
+
+    def test_the_local_engine_is_installed_by_default(self):
+        """Decisao de 0.10.0: sem extra a instalar para o caminho local.
+
+        O publico e o pesquisador qualitativo. "Instale o extra certo" e uma
+        etapa a mais para errar antes de ver qualquer resultado, e o preco
+        (~67 MB) e menor do que essa friccao. O extra permanece declarado para
+        nao quebrar quem seguiu instrucoes antigas.
+        """
+        import tomllib
+
+        data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        base = " ".join(data["project"]["dependencies"])
+        assert "arcadedb-embedded" in base, "o motor local deve vir na instalacao base"
+        assert "arcadedb-embedded" in self._extras(), "o extra antigo deve seguir valido"

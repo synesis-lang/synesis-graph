@@ -14,7 +14,7 @@ import pytest
 from synesis_graph.arcadedb_client import ArcadeDBClient, ArcadeDBError
 from synesis_graph.backends.base import ArcadeDBBackendAdapter
 from synesis_graph.config import BACKEND_ARCADEDB, ArcadeDBConfig
-from synesis_graph.core import ConnectionError, SyncError
+from synesis_graph.core import ConnectionError, SourceFieldSpec, SyncError
 from synesis_graph.sanitize import sanitize_arcadedb_database_name
 
 
@@ -275,10 +275,14 @@ def test_synchronize_without_connection_is_an_error(adapter, minimal_payload):
 # metrics
 # ---------------------------------------------------------------------------
 def test_metrics_run_and_report_the_scope_caveat(connected, minimal_payload):
-    """The scores are not comparable to Neo4j's; saying so is part of the export."""
+    """The scores are not comparable to Neo4j's; saying so is part of the export.
+
+    The terminal carries the plain-language wording — the `algo.*` phrasing is
+    written into `ProjectContext` instead, where the reader is a program.
+    """
     reporter = DummyReporter()
     assert connected.compute_backend_metrics(minimal_payload, reporter) is None
-    assert any("algo.*" in message for _, message in reporter.messages)
+    assert any("not directly comparable" in message for _, message in reporter.messages)
 
 
 def test_metrics_without_connection_is_an_error(adapter, minimal_payload):
@@ -420,3 +424,44 @@ def test_integration_rerun_is_idempotent(minimal_payload):
     finally:
         if admin.database_exists(config.database):
             admin.drop_database(config.database)
+
+
+# ---------------------------------------------------------------------------
+# A template may declare a field named like a structural bibliographic prop
+# ---------------------------------------------------------------------------
+
+
+def test_source_index_props_list_a_repeated_property_once(payload_factory):
+    """`title` is prepended structurally AND declarable by the template.
+
+    ArcadeDB does not raise on the repetition the way Neo4j does — it accepts the
+    composite and indexes the same column twice — so the defect is silent here.
+    The declared capability is derived from this same list, so a duplicate would
+    also reach `ProjectContext.fulltext_source_fields` and teach the consumer a
+    `SEARCH_INDEX` name that does not match the index actually created.
+    """
+    from synesis_graph.backends.arcadedb import _source_index_props
+
+    payload = payload_factory(
+        source_fields=[
+            SourceFieldSpec("title", "TEXT"),
+            SourceFieldSpec("headline", "TEXT"),
+        ]
+    )
+
+    props = _source_index_props(payload)
+
+    assert props.count("title") == 1
+    assert len(props) == len(set(props))
+    assert "headline" in props
+
+
+def test_concept_index_props_list_a_repeated_property_once(payload_factory):
+    from synesis_graph.backends.arcadedb import _concept_index_props
+
+    payload = payload_factory(scalar_fields=["search_name", "ontology_description"])
+
+    props = _concept_index_props(payload)
+
+    assert props.count("search_name") == 1
+    assert len(props) == len(set(props))

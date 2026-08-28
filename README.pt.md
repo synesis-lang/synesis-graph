@@ -14,19 +14,29 @@ Três backends acompanham esta versão — **Neo4j** e **ArcadeDB** (property gr
 
 ### Escolhendo um backend
 
-| | Neo4j | ArcadeDB | HTML |
-|---|---|---|---|
-| Protocolo | BOLT (`bolt://`, porta 7687) | HTTP/JSON (`http://`, porta 2480) | — |
-| Dependência Python | driver `neo4j` (extra) | nenhuma (só stdlib) | nenhuma |
-| Infraestrutura | servidor de banco | servidor de banco | nenhuma |
-| Algoritmos de grafo | exige plugin GDS | nativos (`algo.*`) | — |
-| Busca full-text | índice Lucene | índice Lucene com BM25 | — |
-| Licença | GPL/comercial | Apache 2.0 | — |
+| | Neo4j | ArcadeDB | ArcadeDB embedded | HTML |
+|---|---|---|---|---|
+| Protocolo | BOLT (`bolt://`, porta 7687) | HTTP/JSON (`http://`, porta 2480) | in-process | — |
+| Extra a instalar | driver `neo4j` | nenhum | nenhum | nenhum |
+| Infraestrutura | servidor de banco | servidor de banco | **nenhuma** | nenhuma |
+| Exige Java | sim (servidor) | sim (servidor) | **não** (JVM embutida) | — |
+| Compartilhável entre pessoas | sim | sim | não (processo único) | — |
+| Algoritmos de grafo | exige plugin GDS | nativos (`algo.*`) | nativos (`algo.*`) | — |
+| Busca full-text | índice Lucene | índice Lucene com BM25 | índice Lucene com BM25 | — |
+| Licença | GPL/comercial | Apache 2.0 | Apache 2.0 | — |
 
-Os dois backends de banco produzem o **mesmo grafo** a partir do mesmo projeto: no
-corpus FACE/UFMG todas as contagens estruturais coincidem (conceitos, itens, fontes e
-todos os tipos de relação). Diferem no escopo das métricas avançadas — veja
-[Métricas de Grafo](#métricas-de-grafo).
+Os três backends de banco produzem o **mesmo grafo** a partir do mesmo projeto. No
+corpus FACE/UFMG todas as contagens estruturais coincidem entre Neo4j e ArcadeDB; no
+corpus Quinto_Andar (41.474 itens, 7.293 conceitos, 661 fontes) o backend embedded
+reproduz a exportação do Neo4j Aura nas 16 contagens de nós e relações. Diferem no
+escopo das métricas avançadas — veja [Métricas de Grafo](#métricas-de-grafo).
+
+**`arcadedb` ou `arcadedb-embedded`?** Mesmo motor, entregas diferentes. Use o backend
+de servidor quando várias pessoas compartilham um grafo, ou quando algo remoto precisa
+alcançá-lo. Use o embedded para trabalhar sozinho: não há nada a instalar além do `pip`,
+nada a iniciar antes de trabalhar, e o grafo é um diretório que se copia ou se apaga. A
+Fase B abaixo transforma esse diretório em algo que um cliente de chat consulta, ainda
+sem servidor a administrar.
 
 ---
 
@@ -389,7 +399,8 @@ cd synesis-graph
 # Instale (editável) com os backends de grafo que precisar
 pip install -e ".[neo4j]"
 
-# Os backends ArcadeDB e HTML não precisam de extra — usam só a biblioteca padrão
+# Tudo menos o Neo4j funciona de imediato — inclusive o motor de grafo local,
+# que traz o próprio Java. Não há mais nada a instalar.
 pip install -e .
 ```
 
@@ -400,7 +411,7 @@ pip install -e .
 | synesis | 0.11.0 | — | ≥3.10 |
 | synesis-coder | 0.8.0 | ≥0.10.0 | ≥3.10 |
 | synesis-lsp | 0.22.0 | ≥0.10.0 | ≥3.10 |
-| synesis-graph | 0.6.0 | ≥0.10.0 | ≥3.10 |
+| synesis-graph | 0.10.0 | ≥0.10.0 | ≥3.10 |
 
 ### Plugin GDS (Opcional)
 
@@ -448,6 +459,9 @@ synesis-graph neo4j --project ./meu-projeto/analise.synp
 # Sincroniza com o ArcadeDB
 synesis-graph arcadedb --project ./meu-projeto/analise.synp
 
+# Sincroniza com um banco ArcadeDB local — sem servidor, sem porta, sem Java
+synesis-graph arcadedb-embedded --project ./meu-projeto/analise.synp
+
 # Gera um grafo HTML interativo e autocontido
 synesis-graph html --project ./meu-projeto/analise.synp --output graph.html
 
@@ -463,6 +477,35 @@ synesis-graph --help
 4. **Sincronização:** Dados são injetados (Conceitos, Citações, Fontes, Relações).
 5. **Métricas Nativas:** Calculadas via Cypher puro.
 6. **Métricas Avançadas:** GDS no Neo4j (com aviso se o plugin não estiver presente), `algo.*` nativo no ArcadeDB (sempre disponível).
+
+---
+
+## Perguntando ao Grafo (`serve`)
+
+Um grafo exportado é um diretório. O `serve` o publica via
+[MCP](https://modelcontextprotocol.io), para que o Claude Desktop, o Claude Code
+ou a extensão do VSCode consultem o corpus em linguagem natural:
+
+```bash
+synesis-graph serve                       # publica ./databases, Ctrl+C encerra
+synesis-graph serve --db-path ./grafos    # uma raiz exportada em outro lugar
+```
+
+O comando imprime a entrada `mcpServers` a colar na configuração do cliente de
+chat. Três coisas que ele resolve e o motor não:
+
+- **O MCP nasce desabilitado** na distribuição embedded, e a configuração vive no
+  servidor em execução, não em disco — então é habilitada a cada start.
+- **Escritas ficam desligadas** a menos que `--allow-writes` diga o contrário. Um
+  corpus são meses de trabalho de codificação, e lê-lo é o caso de uso. Operações
+  administrativas seguem bloqueadas de todo modo.
+- **A senha é gerada por sessão e impressa, nunca gravada em arquivo.** Defina
+  `SYNESIS_DB_PASSWORD` para manter uma entre reinícios e conservar a
+  configuração do cliente válida.
+
+Servir uma raiz sem banco algum sob `databases/` é recusado em vez de iniciado:
+um servidor sobre o diretório errado sobe tranquilamente e responde toda query
+sem nenhuma linha.
 
 ---
 

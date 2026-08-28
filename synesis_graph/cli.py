@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import sys
+import threading
 from pathlib import Path
 
 import click
@@ -17,10 +18,13 @@ if hasattr(sys.stderr, "buffer") and getattr(sys.stderr, "encoding", "").lower()
 
 from synesis_graph import (
     BACKEND_ARCADEDB,
+    BACKEND_ARCADEDB_EMBEDDED,
     BACKEND_HTML,
     BACKEND_NEO4J,
     __version__,
 )
+from synesis_graph.core import PipelineError
+from synesis_graph.serve import DEFAULT_PORT as DEFAULT_SERVE_PORT
 
 # ---------------------------------------------------------------------------
 # Style helpers
@@ -69,13 +73,25 @@ def _build_main_help() -> str:
 
     usage = _c("Usage:", fg="yellow", bold=True) + " synesis-graph [OPTIONS] COMMAND [ARGUMENTS]..."
 
+    # Grouped because the commands do different kinds of work, and the grouping
+    # is what keeps the module's role legible: a backend exports and exits.
     groups = [
         (
             "Graph Backends",
             [
                 ("neo4j", "Sync project to a Neo4j database (bolt://)"),
                 ("arcadedb", "Sync project to an ArcadeDB database (http://)"),
+                (
+                    "arcadedb-embedded",
+                    "Sync project to a local ArcadeDB database (no server)",
+                ),
                 ("html", "Render an interactive HTML graph visualization"),
+            ],
+        ),
+        (
+            "Local Database",
+            [
+                ("serve", "Keep a local database running for chat clients"),
             ],
         ),
     ]
@@ -171,7 +187,7 @@ def _ex(*lines: str) -> str:
                     result.append(_c(tok, fg="green", bold=True))
                 elif re.match(r"^--[\w-]+=?", tok):
                     result.append(_c(tok, fg="cyan"))
-                elif tok in ("neo4j", "arcadedb", "html"):
+                elif tok in ("neo4j", "arcadedb-embedded", "arcadedb", "html", "serve"):
                     result.append(_c(tok, fg="green"))
                 else:
                     result.append(tok)
@@ -245,6 +261,79 @@ _EPILOG_ARCADEDB = _ex(
     "  # serves ArcadeDB Studio) — not a bolt:// URL. No driver and no server",
     "  # plugin are required.",
 )
+
+_EPILOG_ARCADEDB_EMBEDDED = _ex(
+    "  # Export to a local database. No server, no port, no Java:",
+    "  synesis-graph arcadedb-embedded --project project.synp",
+    "",
+    "  # The graph lands in ./databases/<project_name>/ by default.",
+    "  # Point db_path elsewhere in config.toml — it is the SERVER ROOT, and the",
+    "  # database is created in <db_path>/databases/<project_name>:",
+    "  #   [arcadedb-embedded]",
+    '  #   db_path = "."',
+    "",
+    "  # The config file is optional here: there is no credential to supply and",
+    "  # no host to reach, so the defaults already describe a working setup.",
+    "",
+    "  # Semantic search works exactly as on the server backend:",
+    "  synesis-graph arcadedb-embedded --project project.synp \\",
+    "      --vector-embeddings ontology_description",
+    "",
+    "  # Nothing extra to install: the local engine ships with synesis-graph,",
+    "  # and brings its own Java. Exporting works on a clean machine.",
+    "",
+    "  # Same engine as the arcadedb backend, reached in-process instead of over",
+    "  # HTTP. Use that one for a shared server; use this one to work alone,",
+    "  # offline, with nothing to install or keep running.",
+    "",
+    "  # To ask the graph questions from a chat client, publish it with the same",
+    "  # root this command wrote to:",
+    "  synesis-graph serve",
+)
+
+
+_EPILOG_SERVE = _ex(
+    "  # Publish the local database and keep it running. Ctrl+C stops it:",
+    "  synesis-graph serve",
+    "",
+    "  # Serve a graph exported elsewhere. Pass the SAME root the export used —",
+    "  # not the database directory. Both add the databases/ level themselves:",
+    "  #   export:  synesis-graph arcadedb-embedded ... --db-path D:/graphs",
+    "  #   serve:   synesis-graph serve             --db-path D:/graphs",
+    "  synesis-graph serve --db-path D:/graphs",
+    "",
+    "  # The password is generated once and remembered, so restarts keep working",
+    "  # on their own. Set your own only if you want to choose it (8+ chars):",
+    "  #   PowerShell:  $env:SYNESIS_DB_PASSWORD = \"...\"",
+    "  #   bash:        export SYNESIS_DB_PASSWORD=...",
+    "  synesis-graph serve",
+    "",
+    "  # Let a chat client modify the corpus. Off by default, and worth keeping",
+    "  # off: a corpus is months of coding work, and reading it is the use case.",
+    "  synesis-graph serve --allow-writes",
+    "",
+    "  # The command prints the entry to add to your chat client. It is one",
+    "  # entry, not a whole file: paste it beside the servers already there,",
+    "  # never over them.",
+    "",
+    "  # Or have it added for you, keeping every existing entry and backing up",
+    "  # the file first. Opt-in: editing another application's configuration",
+    "  # is your call, not this command's.",
+    "  synesis-graph serve --install claude-desktop",
+    "",
+    "  # VS Code reads a different format (servers/, HTTP directly, no npx) and",
+    "  # keeps it per workspace. This writes .vscode/mcp.json here:",
+    "  synesis-graph serve --install vscode",
+    "",
+    "  # Claude Desktop's file is found on macOS and Windows. Elsewhere, or for",
+    "  # an unusual install, point at it:",
+    "  #   PowerShell:  $env:SYNESIS_MCP_CONFIG = \"C:/path/to/config.json\"",
+    "  #   bash:        export SYNESIS_MCP_CONFIG=~/path/to/config.json",
+    "",
+    "  # Running an ArcadeDB server already? It owns port 2480 — pick another:",
+    "  synesis-graph serve --port 2481 --install vscode",
+)
+
 
 _EPILOG_HTML = _ex(
     "  # Render with default filters (min 3 mentions, min 2 sources):",
@@ -433,6 +522,91 @@ def arcadedb(project, json_input, config, database, vector_embeddings, rebuild_e
 
 
 # ---------------------------------------------------------------------------
+# arcadedb-embedded subcommand
+# ---------------------------------------------------------------------------
+
+
+@main.command(
+    "arcadedb-embedded", cls=_SynesisCommand, epilog=_EPILOG_ARCADEDB_EMBEDDED
+)
+@_source_options
+@_config_option
+@click.option(
+    "--db-path",
+    "db_path",
+    default=None,
+    metavar="DIR",
+    help="Server root for the local database. The database is created in "
+    "<DIR>/databases/<project_name>. Overrides [arcadedb-embedded].db_path "
+    "(default: the current directory).",
+)
+@click.option(
+    "--database",
+    default=None,
+    help="Database name. Also names the unified graph when linking several "
+    "--project files (otherwise the name is derived from the members).",
+)
+@click.option(
+    "--vector-embeddings",
+    "vector_embeddings",
+    default=None,
+    metavar="FIELD,FIELD",
+    help="Ontology fields to embed for semantic search, comma-separated "
+    "(e.g. ontology_description,topic). Each is checked against the "
+    "template; TEXT and TOPIC fields are the ones worth embedding. "
+    "Overrides [arcadedb-embedded.embeddings].fields. Needs the extra: "
+    'pip install "synesis-graph[embeddings]"',
+)
+@click.option(
+    "--rebuild-embeddings",
+    is_flag=True,
+    default=False,
+    help="Recompute every vector instead of reusing the cached "
+    "<project>.embeddings.json. Only needed when the vectors are suspect "
+    "for a reason the model/field/text hashes cannot see.",
+)
+def arcadedb_embedded(
+    project, json_input, config, db_path, database, vector_embeddings, rebuild_embeddings
+):
+    """Sync a Synesis project to a local ArcadeDB database (no server)."""
+    _validate_source(project, json_input)
+    from synesis_graph.pipeline import run_pipeline
+    from synesis_graph.ui import TaskReporter
+
+    fields = _split_fields(vector_embeddings)
+    if rebuild_embeddings and not fields:
+        # Silently doing nothing would read as "the rebuild happened".
+        raise click.UsageError(
+            "--rebuild-embeddings needs --vector-embeddings (or "
+            "[arcadedb-embedded.embeddings].fields in the config)."
+        )
+
+    reporter = TaskReporter("Synesis → local graph")
+    head, extras = _split_projects(project)
+    result = run_pipeline(
+        project_path=head,
+        json_path=Path(json_input).resolve() if json_input else None,
+        config_path=Path(config).resolve(),
+        reporter=reporter,
+        backend=BACKEND_ARCADEDB_EMBEDDED,
+        database=database or None,
+        extra_projects=extras,
+        vector_embeddings=fields,
+        rebuild_embeddings=rebuild_embeddings,
+        cli_overrides={"db_path": db_path},
+    )
+    if result.success:
+        # A finished export is a means, not an end. Without this the researcher
+        # is left with a directory and no idea what to do with it.
+        root = db_path or "."
+        reporter.info(
+            "Your graph is ready. To ask questions about it from a chat client, run: "
+            f"synesis-graph serve --db-path {root}"
+        )
+    _report_result(reporter, result)
+
+
+# ---------------------------------------------------------------------------
 # html subcommand
 # ---------------------------------------------------------------------------
 
@@ -560,6 +734,153 @@ def html(
         html_options=html_options,
     )
     _report_result(reporter, result)
+
+
+# ---------------------------------------------------------------------------
+# serve subcommand
+# ---------------------------------------------------------------------------
+
+
+@main.command(cls=_SynesisCommand, epilog=_EPILOG_SERVE)
+@click.option(
+    "--db-path",
+    "db_path",
+    default=".",
+    show_default=True,
+    type=click.Path(path_type=Path),
+    help="Server root holding the database. The databases themselves live in "
+    "<DIR>/databases/ — the same layout the export writes.",
+)
+@click.option(
+    "--port",
+    default=DEFAULT_SERVE_PORT,
+    show_default=True,
+    type=int,
+    help="HTTP port for the server and its MCP endpoint.",
+)
+@click.option(
+    "--allow-writes",
+    is_flag=True,
+    default=False,
+    help="Let chat clients modify the corpus. Off by default: reading is the "
+    "use case, and a corpus is months of coding work. Administrative "
+    "operations stay blocked either way.",
+)
+@click.option(
+    "--install",
+    type=click.Choice(["claude-desktop", "vscode"]),
+    default=None,
+    help="Add this server to a chat client's configuration, keeping every "
+    "entry already there and backing the file up first. Off by default: "
+    "editing another application's configuration is the researcher's call, "
+    "not this command's. 'vscode' writes .vscode/mcp.json in the current "
+    "directory; for Claude Desktop, SYNESIS_MCP_CONFIG points at the file "
+    "when it lives somewhere unusual.",
+)
+def serve(db_path, port, allow_writes, install):
+    """Keep a local database running for chat clients (Ctrl+C to stop)."""
+    import os
+
+    from synesis_graph.serve import ServeOptions, client_config_snippet, start_server
+    from synesis_graph.ui import TaskReporter
+
+    reporter = TaskReporter("Synesis → local MCP server")
+    with reporter.step("Starting the local server"):
+        handle = start_server(
+            ServeOptions(
+                db_path=Path(db_path),
+                port=port,
+                allow_writes=allow_writes,
+                # An env var lets the password outlive the session without ever
+                # being written to a project file — the client config can then
+                # stay valid across restarts.
+                password=os.environ.get("SYNESIS_DB_PASSWORD") or None,
+            )
+        )
+
+    if isinstance(handle, PipelineError):
+        reporter.error(f"{handle.message} — {handle.details}")
+        raise SystemExit(1)
+
+    reporter.info(f"Serving {len(handle.databases)} database(s): {', '.join(handle.databases)}")
+    reporter.info(f"MCP endpoint: {handle.endpoint}")
+    if allow_writes:
+        reporter.warning("Writes are ENABLED for chat clients.")
+    else:
+        reporter.info("Read-only: chat clients cannot modify the corpus.")
+
+    click.echo()
+    installed = False
+    if install:
+        from synesis_graph.serve import install_into_claude_desktop, install_into_vscode
+
+        if install == "vscode":
+            # Workspace-local by design: an MCP entry that names a port and a
+            # password belongs to the project it was started for, not to every
+            # window the editor opens.
+            outcome = install_into_vscode(handle, path=Path(".vscode") / "mcp.json")
+            client, restart = "VS Code", "Reload the VS Code window to pick it up."
+        else:
+            outcome = install_into_claude_desktop(handle)
+            client = "Claude Desktop"
+            restart = "Restart Claude Desktop to pick it up (quit fully, then reopen)."
+        if isinstance(outcome, PipelineError):
+            # Not fatal: the server is up and usable. Fall back to the manual
+            # route rather than ending a working session over a config file.
+            reporter.warning(f"{outcome.message} — {outcome.details}")
+        else:
+            target, replaced = outcome
+            verb = "Updated" if replaced else "Added"
+            reporter.success(f"{verb} 'synesis-local' in {client} ({target})")
+            reporter.info(restart)
+            installed = True
+
+    if not installed:
+        click.echo(
+            _c(
+                "Add this entry to the \"mcpServers\" section of your chat client's "
+                "configuration, alongside any entries already there:",
+                fg="yellow",
+                bold=True,
+            )
+        )
+        if install == "vscode":
+            from synesis_graph.serve import vscode_config_snippet
+
+            click.echo(vscode_config_snippet(handle))
+        else:
+            click.echo(client_config_snippet(handle, windows=os.name == "nt"))
+        if install is None:
+            click.echo(
+                _c(
+                    "(or re-run with --install claude-desktop / --install vscode "
+                    "to have it added for you, keeping the entries already there)",
+                    fg="bright_black",
+                )
+            )
+    click.echo()
+    if not os.environ.get("SYNESIS_DB_PASSWORD"):
+        # Neither half of the old notice survives: the password is generated
+        # once and remembered, and when the entry was installed there is no
+        # password "above" to refer to.
+        click.echo(
+            _c(
+                "The password was generated for this graph and is remembered, so "
+                "restarts keep working. Set SYNESIS_DB_PASSWORD to choose your own.",
+                fg="bright_black",
+            )
+        )
+    click.echo(_c("Serving. Press Ctrl+C to stop.", fg="green", bold=True))
+
+    try:
+        # The engine runs on its own (non-daemon JVM) threads; this process just
+        # has to stay alive and own the interrupt.
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        click.echo()
+        reporter.info("Stopping the server")
+    finally:
+        handle.stop()
 
 
 # ---------------------------------------------------------------------------

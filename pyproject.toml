@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synesis-graph"
-version = "0.9.0"
+version = "0.10.0"
 description = "Universal pipeline from Synesis projects to graph databases and HTML visualizations"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,6 +35,13 @@ classifiers = [
 dependencies = [
     "synesis>=0.10.0",
     "click>=8.0",
+    # Motor de grafo local, sem servidor e sem Java de sistema (traz a propria
+    # JVM). Dependencia BASE, nao extra: o publico deste modulo e o pesquisador
+    # qualitativo, e "instale o extra correto" e uma etapa a mais para errar
+    # antes de ver qualquer resultado. ~67 MB de download e um preco menor do
+    # que essa friccao. Quem so usa Neo4j ou HTML carrega o peso sem usa-lo —
+    # troca deliberada, decidida a favor de quem tem menos ferramentas.
+    "arcadedb-embedded>=26.8.1",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +51,10 @@ neo4j = ["neo4j>=5.0"]
 # modulo so para sincronizar o grafo. O codigo importa preguicosamente e
 # reporta DependencyError quando ausente, nunca ImportError.
 embeddings = ["sentence-transformers>=3.0"]
+# Mantido como extra vazio-equivalente: `pip install synesis-graph[arcadedb-embedded]`
+# continua funcionando para quem seguiu instrucoes antigas, mas o pacote ja vem na
+# instalacao base desde 0.10.0 e nao ha nada a acrescentar.
+arcadedb-embedded = ["arcadedb-embedded>=26.8.1"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
