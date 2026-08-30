@@ -13,6 +13,172 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ## [Não lançado]
 
+## [0.11.0] - 2026-08-29
+
+### Changed — o rebuild grava com `CREATE` em vez de `MERGE`
+
+Onde o payload já garante chaves únicas — `Item`, `Source` e os conceitos da
+ontologia, medidos em 0 duplicatas ao longo de 272.154 linhas do corpus real —
+o rebuild passa a gravar com `CREATE`. O `MERGE` custa uma busca de índice por
+linha, num índice que cresce durante a carga, e isso degrada de forma
+quadrática: 10.000 nós em 22,2s, 40.000 em 472,8s. A mesma carga com `CREATE`
+mediu 12× mais rápido.
+
+Só é seguro porque o rebuild limpa o grafo antes, e é aplicado só ali. Chains,
+taxonomias e todas as arestas seguem com `MERGE` nos dois modos: a duplicação
+delas está no payload, não no destino — 302.392 extremos de chain resolvem para
+22.553 conceitos distintos —, então ali a deduplicação faz trabalho real.
+
+### Added — `--mode update` grava só o que mudou
+
+`synesis-graph neo4j`, `arcadedb` e `arcadedb-embedded` aceitam
+`--mode rebuild|update`. `rebuild` continua sendo o padrão e não mudou: o grafo é
+apagado e escrito de novo, o que é sempre correto.
+
+`update` incorpora o payload ao grafo existente sem limpá-lo. Num corpus grande
+essa é a diferença entre reescrever tudo e tocar só a fração que de fato mudou —
+os 246.588 itens do corpus Quinto Andar extrapolavam para horas contra um
+servidor pequeno, e a maior parte das reexecuções altera muito pouco disso.
+
+- **Ele não apaga.** O payload descreve o que existe, não o que foi removido:
+  material excluído do projeto permanece no grafo até o próximo rebuild. Isso
+  está no `--help` e é anunciado no início de toda execução em `update` — uma
+  lacuna que ninguém menciona é uma lacuna que ninguém percebe.
+- **Configurações que exigem reconstruir índice são recusadas, não ignoradas em
+  silêncio.** `update` não derruba índices, então não pode aplicar mudança de
+  `fulltext_analyzer`, de modelo de embeddings ou dos campos vetorizados. Ele
+  compara o que o grafo diz ter sido construído com — lido do vértice
+  `ProjectContext`, o único que sabe — contra o que a execução pede, e para com
+  uma mensagem que nomeia a configuração e manda rodar em `rebuild`. Deixar
+  passar deixaria o grafo anunciando uma capacidade que os índices não têm.
+- **Exatamente um `ProjectContext`, nos dois modos.** Em `update` o vértice é
+  substituído em vez de acrescentado, então nenhum cliente lê duas descrições
+  conflitantes do mesmo grafo.
+
+### Changed — o rebuild local grava os vértices em massa
+
+No motor local (embedded), um rebuild passa a gravar `Item`, `Source` e os
+conceitos da ontologia pela API GraphBatch do ArcadeDB, em vez de Cypher. Num
+projeto de 20.000 itens, o sync inteiro caiu de 4,62 s para 1,64 s — 2,8×, por
+cima da mudança para `CREATE` descrita abaixo.
+
+O grafo resultante é idêntico: mesmos vértices, mesmas arestas, mesmas
+propriedades. Só o caminho de escrita muda, e a suíte compara os dois caminhos
+sobre o mesmo payload para que continue assim.
+
+- **Só em rebuild, e só onde as chaves são únicas.** A gravação em massa nunca
+  deduplica, então é usada apenas onde o compilador garante chaves únicas e
+  apenas quando o grafo acabou de ser limpo. Chains e taxonomias seguem com
+  `MERGE` — a duplicação nas linhas delas é intencional — e `--mode update`
+  nunca grava em massa.
+- **As arestas não foram tocadas.** Continuam resolvendo suas pontas pela busca
+  já existente, então não há nada de novo para dar errado justamente na parte do
+  grafo que carrega as relações.
+- **Motores antigos e o backend HTTP seguem iguais.** Onde a API não existe, o
+  caminho anterior roda e produz o mesmo grafo, um pouco mais devagar.
+
+### Fixed — um passo que falhou não reporta mais `[OK]`
+
+Uma sincronização que falhava imprimia `[OK]` e `[ERROR]` para o mesmo passo,
+com uma linha de distância. O marcador de passo só observava exceções
+levantadas, e este código reporta falha **devolvendo** um erro tipado — então um
+`return` antecipado não deixava nada para ele ver.
+
+Seis passos eram afetados, incluindo as duas sincronizações de banco. Duas
+linhas contraditórias sobre o mesmo passo tornam todo log desta ferramenta não
+confiável, o que é pior que qualquer falha isolada: quem aprendeu que `[OK]`
+pode significar erro não consegue confiar no resto.
+
+### Fixed — uma conexão derrubada não joga mais fora uma exportação inteira
+
+Contra um servidor padrão atrás de proxy reverso, uma carga grande podia falhar
+com `Bad Gateway (HTTP 502)` depois de minutos de trabalho, sem deixar nada. O
+banco estava saudável o tempo todo — respondendo em 74 ms enquanto devolvia
+502 —, então era o proxy à frente dele cortando conexões sob carga. A mesma
+instrução passava repetidamente minutos depois, e é isso que caracteriza falha
+transitória em vez de um limite a ser contornado.
+
+- **Falhas de conexão são repetidas na hora.** Quando a conexão nunca abriu, o
+  banco não pode ter visto a instrução, então repetir é seguro. O servidor real
+  parou de aceitar conexões sob carga e se recuperou sozinho em menos de um
+  minuto; esse minuto custava uma exportação inteira.
+- **Cargas interrompidas recomeçam, em vez de continuar.** Quando o proxy corta
+  uma requisição em voo, é impossível saber se o banco aplicou — e como o
+  rebuild grava com `CREATE`, continuar poderia duplicar. O rebuild limpa o
+  grafo antes de gravar, então recomeçar é sempre seguro; o `--mode update` não
+  limpa, então reporta a falha em vez de adivinhar.
+- **A mensagem aponta o culpado certo.** "Bad Gateway" se lê como erro do banco
+  e manda procurar no lugar errado; agora diz que o proxy do servidor fechou a
+  conexão, e que nada ficou pela metade.
+- **Uma limpeza que falha não esconde mais a falha.** Quando a conexão cai no
+  meio da carga, o servidor descarta a transação junto, e o `rollback` seguinte
+  responde "transação não encontrada" — resposta que **substituía** o erro
+  original. Como "não encontrada" não é falha transitória, a carga era
+  abandonada depois de uma tentativa em vez de três.
+
+### Fixed — as cargas para o servidor vão em pedaços menores
+
+Cada instrução enviava até 50.000 linhas, o que num corpus real é uma única
+requisição HTTP de 32,6 MB — grande o bastante para um proxy reverso padrão
+derrubá-la sob carga. Essa era a causa real das falhas `Bad Gateway` acima.
+
+O limite foi herdado do backend Neo4j, cujo driver faz streaming por uma conexão
+longa em vez de uma requisição por instrução. Este backend passa a enviar 5.000
+linhas por vez: 3,3 MB, e comprovadamente **mais rápido** além de menor (6.625
+linhas/s contra 4.917), porque o servidor trabalha numa requisição enquanto a
+próxima ainda chega.
+
+### Fixed — todo conceito recebe pontuação de centralidade
+
+As pontuações eram gravadas só nos primeiros 20.000 conceitos. Numa ontologia de
+22.585, isso deixava 2.585 deles — 11% — sem PageRank e sem betweenness,
+enquanto a execução reportava `[OK] PageRank calculated (20000 nodes)`.
+Perguntar ao grafo pelos "conceitos mais centrais" devolvia um ranking que
+omitia em silêncio um nono da ontologia.
+
+A causa: o servidor devolve no máximo 20.000 linhas por resposta e sinaliza o
+resto como truncado — e essa sinalização nunca era lida. Agora é, e uma resposta
+parcial é recusada em vez de confundida com uma completa.
+
+- **As métricas ficaram mais rápidas, não mais lentas.** O teto de linhas é um
+  padrão por requisição, não um limite do servidor, então o resultado inteiro
+  passa a ser pedido de uma vez. Betweenness no corpus medido caiu de cerca de
+  34 minutos — ler em páginas re-executa o algoritmo a cada página — para 1m36s.
+- **Cálculos longos avisam quanto vão demorar**, e citam `--metrics fast` como
+  a saída.
+
+### Added — `--metrics all|fast|none`
+
+Escolhe quanto medir. `all` (o padrão) calcula centralidade e comunidades;
+`fast` mantém o PageRank e pula os dois lentos; `none` pula todos, deixando o
+grafo em si completo.
+
+O padrão calcula tudo de propósito: essas pontuações são achados de pesquisa,
+não diagnóstico, então nunca se perdem a menos que alguém escolha trocá-las por
+tempo.
+
+### Changed — uma carga longa avisa quanto tempo vai levar
+
+A sincronização roda numa transação só, então o banco fica vazio até o final.
+Somado a um terminal que não imprimia nada por minutos, isso era
+indistinguível de travamento — e interromper joga fora todo o trabalho. Cargas
+de 50.000 excertos ou mais agora informam a duração aproximada antes de começar
+e dizem claramente que o silêncio é esperado.
+
+### Fixed — `pip install synesis-graph` funciona em Macs Intel
+
+O motor de grafo local publica versões para Linux, Windows e Apple Silicon, mas
+não para Macs Intel — e não distribui o código-fonte para compilar. Declarado
+como dependência comum, isso não significava "o motor local está indisponível":
+o pip não encontrava nada para instalar e abortava a instalação **inteira**, e o
+pesquisador ficava sem os backends Neo4j e HTML também, por causa de um motor
+que talvez nunca fosse usar.
+
+Agora ele só é pedido onde existe versão compilada. Num Mac Intel os demais
+backends instalam e funcionam normalmente, e pedir o motor local explica que não
+há versão para aquela máquina, em vez de sugerir uma reinstalação que não
+resolve.
+
 ## [0.10.0] - 2026-08-27
 
 ### Added — a camada de sync do ArcadeDB passa a ser tipada por um contrato de transporte

@@ -35,11 +35,15 @@ class FakeClient:
         self.transactions: list[str] = []
         self._query_results = query_results or {}
 
-    def command(self, statement, params=None, *, language="cypher", database=None):
+    def command(
+        self, statement, params=None, *, language="cypher", database=None, limit=None
+    ):
         self.statements.append((language, statement, params))
         return []
 
-    def query(self, statement, params=None, *, language="cypher", database=None):
+    def query(
+        self, statement, params=None, *, language="cypher", database=None, limit=None
+    ):
         self.statements.append((language, statement, params))
         for needle, rows in self._query_results.items():
             if needle in statement:

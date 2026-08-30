@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synesis-graph"
-version = "0.10.0"
+version = "0.11.0"
 description = "Universal pipeline from Synesis projects to graph databases and HTML visualizations"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,7 +41,16 @@ dependencies = [
     # antes de ver qualquer resultado. ~67 MB de download e um preco menor do
     # que essa friccao. Quem so usa Neo4j ou HTML carrega o peso sem usa-lo —
     # troca deliberada, decidida a favor de quem tem menos ferramentas.
-    "arcadedb-embedded>=26.8.1",
+    #
+    # O MARCADOR NAO E OPCIONAL. O projeto publica wheels para Linux
+    # (x86_64/ARM64), Windows (x86_64) e macOS **Apple Silicon apenas**, e NAO
+    # publica sdist. Num Mac Intel pip nao acha nada para instalar e aborta a
+    # instalacao INTEIRA — o pesquisador fica sem Neo4j e sem HTML tambem, por
+    # causa de um motor que ele talvez nunca fosse usar. O marcador faz o pip
+    # simplesmente pular a dependencia onde nao ha wheel; o backend embedded
+    # entao reporta `DependencyError` se for chamado, que e um problema
+    # localizado em vez de um bloqueio total.
+    "arcadedb-embedded>=26.8.1; platform_system != 'Darwin' or platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]
@@ -54,7 +63,9 @@ embeddings = ["sentence-transformers>=3.0"]
 # Mantido como extra vazio-equivalente: `pip install synesis-graph[arcadedb-embedded]`
 # continua funcionando para quem seguiu instrucoes antigas, mas o pacote ja vem na
 # instalacao base desde 0.10.0 e nao ha nada a acrescentar.
-arcadedb-embedded = ["arcadedb-embedded>=26.8.1"]
+arcadedb-embedded = [
+    "arcadedb-embedded>=26.8.1; platform_system != 'Darwin' or platform_machine == 'arm64'"
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

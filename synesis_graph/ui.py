@@ -82,19 +82,52 @@ class TaskReporter:
 
 
 class _StepContext:
-    """Context manager for a named pipeline step."""
+    """Context manager for a named pipeline step.
+
+    A step ends in `[OK]` only if it neither raised nor was told it failed.
+
+    That second clause is not redundant. This codebase reports failure by
+    *returning* a typed error rather than raising one — `sync_to_arcadedb`,
+    `ensure_database_exists` and four other call sites all do — and an early
+    `return` inside a `with` block leaves the context manager with no exception
+    to see. Judging on exceptions alone therefore printed `[OK]` for a sync that
+    had just failed, immediately above the `[ERROR]` line reporting the same
+    failure. Observed against a real server:
+
+        [OK]    Building the graph (with 22585 concept vectors)
+        [ERROR] Backend sync failed: ... Bad Gateway (HTTP 502)
+
+    Two contradictory lines about one step make every log from this tool
+    untrustworthy, which is worse than the underlying bug: a reader who has
+    learned that `[OK]` can mean failure cannot use any of it.
+    """
 
     def __init__(self, reporter: TaskReporter, description: str) -> None:
         self.reporter = reporter
         self.description = description
+        self._failure: str | None = None
 
     def __enter__(self) -> _StepContext:
         _emit(f"{_label_step()} {self.description}...")
         return self
 
+    def fail(self, detail: str = "") -> None:
+        """Marks this step failed, for a caller that returns instead of raising.
+
+        The caller still reports the error itself; this only stops the step from
+        claiming success. Kept as an explicit call rather than inferred from the
+        block's return value, because a context manager cannot see that value —
+        Python gives `__exit__` the exception, and nothing else.
+        """
+        self._failure = detail
+
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         if exc:
             self.reporter.error(f"{self.description}: {exc}")
+        elif self._failure is not None:
+            # The caller emits its own error line with the details; saying only
+            # that the step did not succeed keeps this from being said twice.
+            self.reporter.error(f"{self.description}: failed")
         else:
             self.reporter.success(f"{self.description}")
         return False

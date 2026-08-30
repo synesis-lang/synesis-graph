@@ -203,3 +203,77 @@ class TestOptionalExtras:
         base = " ".join(_pyproject()["project"]["dependencies"])
         assert "arcadedb-embedded" in base, "o motor local deve vir na instalacao base"
         assert "arcadedb-embedded" in self._extras(), "o extra antigo deve seguir valido"
+
+
+class TestIntelMacInstalls:
+    """`pip install synesis-graph` must succeed where the local engine cannot run.
+
+    `arcadedb-embedded` publishes wheels for Linux (x86_64/ARM64), Windows
+    (x86_64) and macOS on **Apple Silicon only**, and ships no sdist. Declared
+    unconditionally it is not "the embedded backend is unavailable" on an Intel
+    Mac — pip finds nothing to install and aborts the whole installation, so the
+    researcher loses Neo4j and HTML too, over an engine they may never use.
+    """
+
+    def _embedded_requirement(self) -> str:
+        deps = _pyproject()["project"]["dependencies"]
+        found = [d for d in deps if d.startswith("arcadedb-embedded")]
+        assert len(found) == 1, f"expected exactly one declaration, got {found}"
+        return found[0]
+
+    def test_the_local_engine_is_conditional_on_the_platform(self):
+        requirement = self._embedded_requirement()
+        assert ";" in requirement, (
+            "arcadedb-embedded must carry an environment marker, or the install "
+            "fails outright on a platform with no wheel"
+        )
+
+    def test_the_marker_excludes_intel_macs_and_nothing_else(self):
+        """Evaluated rather than pattern-matched: a marker that parses but
+        selects the wrong platforms would pass a string comparison."""
+        from packaging.requirements import Requirement
+
+        marker = Requirement(self._embedded_requirement()).marker
+        assert marker is not None
+
+        cases = {
+            ("Darwin", "x86_64"): False,  # the Intel Mac this exists for
+            ("Darwin", "arm64"): True,
+            ("Linux", "x86_64"): True,
+            ("Linux", "aarch64"): True,
+            ("Windows", "AMD64"): True,
+        }
+        for (system, machine), expected in cases.items():
+            got = marker.evaluate({"platform_system": system, "platform_machine": machine})
+            assert got is expected, f"{system}/{machine}: expected {expected}, got {got}"
+
+
+def test_an_intel_mac_is_told_the_truth_about_the_local_engine(monkeypatch):
+    """"Reinstall" is a loop that cannot end when no wheel exists for the machine.
+
+    The advice has to name the backends that DO work there, or a researcher
+    reads one unavailable backend as the whole tool being broken.
+    """
+    import platform
+
+    from synesis_graph.arcadedb_embedded_client import missing_embedded_engine_advice
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    advice = missing_embedded_engine_advice()
+
+    assert "Intel" in advice
+    assert "reinstall" not in advice.lower(), "there is nothing to reinstall"
+    assert "arcadedb" in advice and "html" in advice, "name what still works"
+
+
+def test_other_platforms_still_get_the_reinstall_advice(monkeypatch):
+    """There a missing package really is a broken install."""
+    import platform
+
+    from synesis_graph.arcadedb_embedded_client import missing_embedded_engine_advice
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+
+    assert "reinstall" in missing_embedded_engine_advice().lower()

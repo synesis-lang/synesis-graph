@@ -52,6 +52,7 @@ class ArcadeDBTransport(Protocol):
         *,
         language: str = "cypher",
         database: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Executes a statement that may modify data or schema.
 
@@ -68,12 +69,20 @@ class ArcadeDBTransport(Protocol):
         *,
         language: str = "cypher",
         database: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Executes a read-only statement.
 
         Returns a fully materialised list, not a lazy cursor: callers may iterate
         the result more than once, and a single-pass iterator would silently
         yield nothing on the second pass.
+
+        `limit` raises the per-response row cap where a transport has one. The
+        HTTP server caps a response at 20,000 rows and flags the remainder as
+        truncated; the embedded engine has no such cap and ignores the argument.
+        It is part of the contract because the caller cannot know which
+        transport it holds, and asking for the whole of a large result must not
+        depend on that.
         """
         ...
 

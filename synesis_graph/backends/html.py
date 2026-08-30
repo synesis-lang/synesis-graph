@@ -711,11 +711,12 @@ class HTMLBackendAdapter(BackendAdapter):
     ) -> PipelineError | None:
         if self._output_path is None:
             return ConnectionError(message="Output path not initialized", stage="sync")
-        with reporter.step("Rendering HTML graph"):
+        with reporter.step("Rendering HTML graph") as step:
             try:
                 html = _html_render_payload(payload, self.config, self._template_path)
                 self._output_path.write_text(html, encoding="utf-8")
             except Exception as e:
+                step.fail()
                 return SyncError(
                     message="Failed to render HTML graph",
                     stage="sync",

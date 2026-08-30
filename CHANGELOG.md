@@ -13,6 +13,174 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-29
+
+### Changed — a full rebuild writes with `CREATE` instead of `MERGE`
+
+Where the payload already guarantees unique keys — `Item`, `Source` and the
+ontology's concepts, measured at 0 duplicates across 272,154 rows of the real
+corpus — a rebuild now writes with `CREATE`. `MERGE` costs an index lookup per
+row against an index that grows as the load proceeds, which degrades
+quadratically: 10,000 nodes in 22.2s, 40,000 in 472.8s. The same load with
+`CREATE` measured 12x faster.
+
+This is safe only because a rebuild clears the graph first, and it is applied
+only there. Chains, taxonomies and every edge keep `MERGE` in both modes: their
+duplication is in the payload rather than in the destination — 302,392 chain
+endpoints resolve to 22,553 distinct concepts — so the deduplication is doing
+real work.
+
+### Added — `--mode update` writes only what changed
+
+`synesis-graph neo4j`, `arcadedb` and `arcadedb-embedded` accept
+`--mode rebuild|update`. `rebuild` stays the default and is unchanged: the graph
+is wiped and written again, which is always correct.
+
+`update` merges the payload into the existing graph without clearing it. On a
+large corpus that is the difference between rewriting everything and touching
+the fraction that actually moved — the 246,588-item Quinto Andar corpus
+extrapolated to hours against a small server, and most re-runs change very
+little of it.
+
+- **It does not delete.** The payload describes what exists, not what was
+  removed, so material deleted from the project stays in the graph until the
+  next rebuild. This is stated in `--help` and announced at the start of every
+  update run, because a gap nobody mentions is a gap nobody notices.
+- **Settings that need an index rebuild are refused, not silently ignored.**
+  `update` does not drop indexes, so it cannot apply a changed
+  `fulltext_analyzer`, embeddings model or embedded field list. It compares what
+  the graph says it was built with — read from the `ProjectContext` vertex, the
+  only thing that knows — against what the run asks for, and stops with a message
+  naming the setting and telling you to rebuild. Letting it through would leave
+  the graph advertising a capability its indexes do not have.
+- **Exactly one `ProjectContext`, in both modes.** In update the vertex is
+  replaced rather than appended, so a client never reads two conflicting
+  descriptions of the same graph.
+
+### Changed — a local rebuild bulk-loads its vertices
+
+On the local (embedded) engine, a rebuild now writes `Item`, `Source` and the
+ontology's concepts through ArcadeDB's GraphBatch API instead of Cypher. On a
+20,000-item project the whole sync went from 4.62s to 1.64s — 2.8x, on top of
+the `CREATE` change below.
+
+The resulting graph is identical: same vertices, same edges, same properties.
+Only the write path differs, and the test suite compares both paths over the
+same payload to keep it that way.
+
+- **Rebuild only, and only where keys are unique.** Bulk loading never
+  deduplicates, so it is used only where the compiler guarantees unique keys and
+  only when the graph was just cleared. Chains and taxonomies keep `MERGE` — the
+  duplication in their rows is meaningful — and `--mode update` never bulk-loads
+  at all.
+- **Edges are untouched.** They still resolve their endpoints through the
+  existing lookup, so there is nothing new to go wrong in the part of the graph
+  that carries the relationships.
+- **Older engines and the HTTP backend are unaffected.** Where the API is not
+  available the previous path runs, producing the same graph a little slower.
+
+### Fixed — a step that failed no longer reports `[OK]`
+
+A sync that failed printed both `[OK]` and `[ERROR]` for the same step, one line
+apart. The step marker only watched for raised exceptions, and this codebase
+reports failure by *returning* a typed error — so an early return left nothing
+for it to see.
+
+Six steps were affected, including both database syncs. Two contradictory lines
+about one step make every log from this tool untrustworthy, which is worse than
+any single failure: a reader who has learned that `[OK]` can mean failure cannot
+rely on the rest of it either.
+
+### Fixed — a dropped connection no longer throws away a finished export
+
+Against a stock server behind a reverse proxy, a large upload could fail with
+`Bad Gateway (HTTP 502)` after minutes of work, leaving nothing behind. The
+database was healthy throughout — answering its readiness probe in 74ms while
+returning 502s — so the proxy in front of it was cutting connections under load.
+The same statement succeeded repeatedly minutes later, which is what makes this
+a transient failure rather than a limit worth tuning around.
+
+- **Connection failures are retried immediately.** When the connection never
+  opened, the database cannot have seen the statement, so repeating it is safe.
+  The real server stopped accepting connections under load and recovered on its
+  own within a minute; that minute used to cost a whole export.
+- **Interrupted uploads restart, rather than resuming.** When a proxy cuts a
+  request in flight, whether the database applied it is unknowable — and since a
+  rebuild writes with `CREATE`, resuming could duplicate. A rebuild clears the
+  graph before writing, so starting over is always safe; `--mode update` does
+  not clear, so it reports the failure instead of guessing.
+- **The message names the right culprit.** "Bad Gateway" reads as a database
+  error and sends you looking in the wrong place; it now says the server's proxy
+  closed the connection, and that nothing was left half-written.
+- **A failed cleanup no longer hides the failure.** When the connection drops
+  mid-upload the server discards the transaction with it, so the rollback that
+  follows answers "transaction not found" — and that answer used to *replace*
+  the original error. Since "not found" is not a transient failure, the upload
+  was abandoned after one attempt instead of three.
+
+### Fixed — uploads to a server are sent in smaller pieces
+
+Each statement was sending up to 50,000 rows, which for a real corpus is a
+single 32.6MB HTTP request — large enough that a stock reverse proxy drops it
+under load. That was the actual cause of the `Bad Gateway` failures above.
+
+The limit was inherited from the Neo4j backend, whose driver streams over a
+long-lived connection instead of making one request per statement. This backend
+now sends 5,000 rows at a time: 3.3MB, and measurably *faster* as well as
+smaller (6,625 rows/s against 4,917), because the server can work on one request
+while the next is still arriving.
+
+### Fixed — every concept gets a centrality score
+
+Scores were written for only the first 20,000 concepts. On a 22,585-concept
+ontology that left 2,585 of them — 11% — with no PageRank and no betweenness,
+while the run reported `[OK] PageRank calculated (20000 nodes)`. Asking the
+graph for "the most central concepts" returned a ranking that silently omitted
+a ninth of the ontology.
+
+The cause: the server returns at most 20,000 rows per response and flags the
+rest as truncated, and that flag was never read. It is now, and a partial
+response is refused rather than mistaken for a complete one.
+
+- **The metrics themselves got faster, not slower.** The row cap is a
+  per-request default rather than a server limit, so the whole result is now
+  requested at once. Betweenness over the measured corpus went from about 34
+  minutes — reading it in pages re-runs the algorithm once per page — to 1m36s.
+- **Long calculations say how long they will take**, and name `--metrics fast`
+  as the way to skip them.
+
+### Added — `--metrics all|fast|none`
+
+Chooses how much measuring to do. `all` (the default) computes centrality and
+communities; `fast` keeps PageRank and skips the two slow ones; `none` skips
+them entirely, leaving the graph itself complete.
+
+The default computes everything on purpose: these scores are research findings,
+not diagnostics, so they are never lost unless someone chooses to trade them for
+time.
+
+### Changed — a long upload says how long it will take
+
+A sync runs in one transaction, so the database stays empty until the very end.
+Combined with a terminal that printed nothing for minutes, that was
+indistinguishable from a freeze — and interrupting throws away all the work.
+Uploads of 50,000 excerpts or more now state the rough duration up front and say
+plainly that silence is expected.
+
+### Fixed — `pip install synesis-graph` works on Intel Macs
+
+The local graph engine publishes builds for Linux, Windows and Apple Silicon,
+but not for Intel Macs — and it ships no source to build from. Declared as an
+ordinary requirement, that did not mean "the local engine is unavailable": pip
+found nothing to install and aborted the **entire** installation, so the
+researcher lost the Neo4j and HTML backends too, over an engine they may never
+have used.
+
+It is now requested only where a build exists. On an Intel Mac the other
+backends install and work normally, and asking for the local engine explains
+that no build exists for that machine rather than suggesting a reinstall that
+cannot help.
+
 ## [0.10.0] - 2026-08-27
 
 ### Added — the ArcadeDB sync layer is typed against a transport contract

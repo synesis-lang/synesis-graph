@@ -8,11 +8,23 @@ from pathlib import Path
 from typing import Any
 
 from synesis_graph.arcadedb_client import ArcadeDBClient, ArcadeDBError
-from synesis_graph.arcadedb_embedded_client import ArcadeDBEmbeddedClient
+from synesis_graph.arcadedb_embedded_client import (
+    ArcadeDBEmbeddedClient,
+    missing_embedded_engine_advice,
+)
 from synesis_graph.arcadedb_transport import ArcadeDBTransport
+from synesis_graph.backends.arcadedb import (
+    announce_scale as arcadedb_announce_scale,
+)
 from synesis_graph.backends.arcadedb import clear_database as arcadedb_clear_database
+from synesis_graph.backends.arcadedb import (
+    incompatible_with_update as arcadedb_incompatible_with_update,
+)
+from synesis_graph.backends.arcadedb import (
+    read_project_context as arcadedb_read_project_context,
+)
 from synesis_graph.backends.arcadedb import sync_to_arcadedb
-from synesis_graph.backends.neo4j import sync_to_neo4j
+from synesis_graph.backends.neo4j import SyncMode, sync_to_neo4j
 from synesis_graph.config import (
     BACKEND_ARCADEDB,
     BACKEND_ARCADEDB_EMBEDDED,
@@ -64,8 +76,38 @@ def _notification_filter() -> dict[str, Any]:
 # ============================================================================
 # BACKEND ADAPTERS (Phase 3)
 # ============================================================================
+def _sync_step_label(base: str, mode: SyncMode) -> str:
+    """Names the sync step so the researcher can see which mode actually ran.
+
+    An incremental run that silently looked like a full rebuild would be the
+    worst outcome of this feature: until deletion exists (Etapa E), `update`
+    leaves removed items in the graph, and someone has to be able to tell from
+    the output that that is what happened.
+    """
+    return base if mode == "rebuild" else f"{base} (updating in place)"
+
+
 class BackendAdapter(ABC):
     """Contract for backend-specific persistence and metrics operations."""
+
+    #: How this run treats data already in the destination. `"rebuild"` (the
+    #: default, and what every run did before the mode existed) wipes and
+    #: rewrites; `"update"` merges in place, leaving untouched anything the
+    #: payload does not mention.
+    #:
+    #: A plain attribute rather than a constructor argument or an abstract
+    #: property: every adapter shares the same meaning, only some act on it, and
+    #: the pipeline sets it uniformly right after building the adapter. Backends
+    #: with no notion of an existing destination — HTML writes a fresh file —
+    #: simply never read it.
+    mode: SyncMode = "rebuild"
+
+    #: Which advanced metrics to compute: `all` (the default), `fast` or `none`.
+    #: Centrality over a large graph costs minutes, and the researcher owns that
+    #: trade-off — but the default runs everything, because the scores are
+    #: research output rather than diagnostics. Backends without advanced metrics
+    #: never read it.
+    metrics: str = "all"
 
     @property
     @abstractmethod
@@ -176,11 +218,12 @@ class Neo4jBackendAdapter(BackendAdapter):
         requested_name = sanitize_database_name(payload.project_name)
         reporter.info(f"Target database: {requested_name}")
 
-        with reporter.step("Checking/Creating Database"):
+        with reporter.step("Checking/Creating Database") as step:
             self.db_name, db_error = ensure_database_exists(
                 self.driver, requested_name, reporter, default_database=self.config.database
             )
             if db_error:
+                step.fail()
                 return db_error
 
         try:
@@ -208,9 +251,12 @@ class Neo4jBackendAdapter(BackendAdapter):
                 stage="connection",
             )
 
-        with reporter.step("Building the graph"):
-            sync_error = sync_to_neo4j(self.session, payload, self.config.fulltext_analyzer)
+        with reporter.step(_sync_step_label("Building the graph", self.mode)) as step:
+            sync_error = sync_to_neo4j(
+                self.session, payload, self.config.fulltext_analyzer, mode=self.mode
+            )
             if sync_error:
+                step.fail()
                 return sync_error
         return None
 
@@ -291,7 +337,15 @@ class _ArcadeDBAdapterBase(BackendAdapter):
         Unlike Neo4j, this is not folded into the sync: dropping the indexes is what
         makes a changed `fulltext_analyzer` take effect, since ArcadeDB would
         otherwise keep the existing index and report success.
+
+        In `update` there is nothing to clear — the existing graph is precisely
+        what the run is adding to. Note that `sync_to_arcadedb` checks the mode
+        again for itself: this step and that function each clear independently
+        today, so turning off only one of them would leave the other wiping the
+        graph an incremental run meant to keep.
         """
+        if self.mode == "update":
+            return None
         if self.client is None:
             return self._not_connected()
         try:
@@ -310,15 +364,46 @@ class _ArcadeDBAdapterBase(BackendAdapter):
         if self.client is None:
             return self._not_connected()
 
-        label = "Building the graph"
+        if self.mode == "update":
+            # Checked here, against the destination, rather than trusted from
+            # the config: only the graph knows what it was actually built with.
+            changed = arcadedb_incompatible_with_update(
+                arcadedb_read_project_context(self.client), payload
+            )
+            if changed:
+                return SyncError(
+                    message="These settings changed and --mode update cannot apply them",
+                    stage="sync",
+                    details=(
+                        "; ".join(changed)
+                        + ". Updating in place does not rebuild the search indexes, "
+                        "so the graph would claim the new setting while still "
+                        "answering under the old one. Re-run without --mode update "
+                        "to rebuild the graph with these settings."
+                    ),
+                )
+
+        label = _sync_step_label("Building the graph", self.mode)
         if self.embeddings is not None and self.embeddings.vectors:
             label = f"{label} (with {len(self.embeddings.vectors)} concept vectors)"
 
-        with reporter.step(label):
+        # Before the step opens, not inside it: the point of these lines is to
+        # set expectations ahead of a long silence, and a notice printed under a
+        # "[STEP] ..." heading that then says nothing for minutes arrives too
+        # late to do that.
+        arcadedb_announce_scale(payload, self.embeddings, reporter.info)
+
+        with reporter.step(label) as step:
             sync_error = sync_to_arcadedb(
-                self.client, payload, self._fulltext_analyzer, self.embeddings
+                self.client,
+                payload,
+                self._fulltext_analyzer,
+                self.embeddings,
+                mode=self.mode,
+                reporter=reporter,
             )
             if sync_error:
+                step.fail()
                 return sync_error
         return None
 
@@ -328,7 +413,7 @@ class _ArcadeDBAdapterBase(BackendAdapter):
         if self.client is None:
             return self._not_connected()
         try:
-            compute_arcadedb_metrics(self.client, payload, reporter)
+            compute_arcadedb_metrics(self.client, payload, reporter, self.metrics)
             return None
         except Exception as e:
             return SyncError(
@@ -439,10 +524,11 @@ class ArcadeDBBackendAdapter(_ArcadeDBAdapterBase):
         self.client.database = requested
         reporter.info(f"Target database: {requested}")
 
-        with reporter.step("Checking/Creating Database"):
+        with reporter.step("Checking/Creating Database") as step:
             try:
                 self.client.create_database(requested)
             except ArcadeDBError as e:
+                step.fail()
                 return SyncError(
                     message="Failed to create database",
                     stage="database_setup",
@@ -492,10 +578,7 @@ class ArcadeDBEmbeddedBackendAdapter(_ArcadeDBAdapterBase):
             return DependencyError(
                 message="The local graph engine is not available",
                 stage="dependency",
-                details=(
-                    "The 'arcadedb-embedded' package ships with synesis-graph. "
-                    "Reinstall with: pip install --force-reinstall synesis-graph"
-                ),
+                details=missing_embedded_engine_advice(),
             )
 
         root = Path(self.config.db_path)
@@ -532,10 +615,11 @@ class ArcadeDBEmbeddedBackendAdapter(_ArcadeDBAdapterBase):
         target = self.config.database_dir(name)
         reporter.info(f"Graph location: {target}")
 
-        with reporter.step("Opening the local graph"):
+        with reporter.step("Opening the local graph") as step:
             try:
                 self.client = ArcadeDBEmbeddedClient(target, database=name)
             except ArcadeDBError as e:
+                step.fail()
                 return ConnectionError(
                     message="Failed to open the local database",
                     stage="database_setup",

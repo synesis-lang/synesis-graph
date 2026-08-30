@@ -380,6 +380,48 @@ def _source_options(fn):
     return fn
 
 
+def _mode_option(fn):
+    """`--mode rebuild|update`, shared by the three database backends.
+
+    Not a config-file setting on purpose. The mode describes one run ("this
+    export is incremental"), not the installation, and a stale `mode = "update"`
+    left in a config file would keep quietly skipping the wipe long after anyone
+    remembered putting it there — with no deletion support yet, that accumulates
+    removed data indefinitely.
+    """
+    return click.option(
+        "--mode",
+        type=click.Choice(["rebuild", "update"]),
+        default="rebuild",
+        show_default=True,
+        help="rebuild: wipe the graph and write it again — always correct, and "
+        "the right choice unless the export is slow. update: write only what "
+        "changed, keeping the existing graph. Update is much faster on a large "
+        "corpus, but it does NOT remove anything: material deleted from the "
+        "project stays in the graph until the next rebuild.",
+    )(fn)
+
+
+def _metrics_option(fn):
+    """`--metrics all|fast|none`, for the two backends that compute them.
+
+    Default `all`, deliberately: centrality and communities are research
+    findings, not diagnostics — they answer which concepts hold a corpus
+    together. The flag exists so a researcher in a hurry can trade them for
+    time, never so they are lost without anyone choosing that.
+    """
+    return click.option(
+        "--metrics",
+        type=click.Choice(["all", "fast", "none"]),
+        default="all",
+        show_default=True,
+        help="all: every measure, including centrality and communities — the "
+        "slowest step on a large graph, and often several minutes. fast: skips "
+        "betweenness and communities, keeping PageRank. none: skips them "
+        "entirely; the graph is still complete, only these scores are absent.",
+    )(fn)
+
+
 def _config_option(fn):
     return click.option(
         "--config",
@@ -438,7 +480,8 @@ def main(ctx, verbose: int, quiet: int) -> None:
     help="Neo4j database name. Also names the unified graph when linking several "
     "--project files (otherwise the name is derived from the members).",
 )
-def neo4j(project, json_input, config, database):
+@_mode_option
+def neo4j(project, json_input, config, database, mode):
     """Sync a Synesis project to a Neo4j database."""
     _validate_source(project, json_input)
     from synesis_graph.pipeline import run_pipeline
@@ -454,6 +497,7 @@ def neo4j(project, json_input, config, database):
         backend=BACKEND_NEO4J,
         database=database or None,
         extra_projects=extras,
+        mode=mode,
     )
     _report_result(reporter, result)
 
@@ -491,7 +535,11 @@ def neo4j(project, json_input, config, database):
     "<project>.embeddings.json. Only needed when the vectors are suspect "
     "for a reason the model/field/text hashes cannot see.",
 )
-def arcadedb(project, json_input, config, database, vector_embeddings, rebuild_embeddings):
+@_mode_option
+@_metrics_option
+def arcadedb(
+    project, json_input, config, database, vector_embeddings, rebuild_embeddings, mode, metrics
+):
     """Sync a Synesis project to an ArcadeDB database."""
     _validate_source(project, json_input)
     from synesis_graph.pipeline import run_pipeline
@@ -517,6 +565,8 @@ def arcadedb(project, json_input, config, database, vector_embeddings, rebuild_e
         extra_projects=extras,
         vector_embeddings=fields,
         rebuild_embeddings=rebuild_embeddings,
+        mode=mode,
+        metrics=metrics,
     )
     _report_result(reporter, result)
 
@@ -565,8 +615,11 @@ def arcadedb(project, json_input, config, database, vector_embeddings, rebuild_e
     "<project>.embeddings.json. Only needed when the vectors are suspect "
     "for a reason the model/field/text hashes cannot see.",
 )
+@_mode_option
+@_metrics_option
 def arcadedb_embedded(
-    project, json_input, config, db_path, database, vector_embeddings, rebuild_embeddings
+    project, json_input, config, db_path, database, vector_embeddings, rebuild_embeddings,
+    mode, metrics
 ):
     """Sync a Synesis project to a local ArcadeDB database (no server)."""
     _validate_source(project, json_input)
@@ -594,6 +647,8 @@ def arcadedb_embedded(
         vector_embeddings=fields,
         rebuild_embeddings=rebuild_embeddings,
         cli_overrides={"db_path": db_path},
+        mode=mode,
+        metrics=metrics,
     )
     if result.success:
         # A finished export is a means, not an end. Without this the researcher
@@ -785,7 +840,7 @@ def serve(db_path, port, allow_writes, install):
     from synesis_graph.ui import TaskReporter
 
     reporter = TaskReporter("Synesis → local MCP server")
-    with reporter.step("Starting the local server"):
+    with reporter.step("Starting the local server") as step:
         handle = start_server(
             ServeOptions(
                 db_path=Path(db_path),
@@ -797,6 +852,8 @@ def serve(db_path, port, allow_writes, install):
                 password=os.environ.get("SYNESIS_DB_PASSWORD") or None,
             )
         )
+        if isinstance(handle, PipelineError):
+            step.fail()
 
     if isinstance(handle, PipelineError):
         reporter.error(f"{handle.message} — {handle.details}")

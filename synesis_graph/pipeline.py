@@ -14,6 +14,7 @@ from synesis_graph.backends.base import (
     _ArcadeDBAdapterBase,
 )
 from synesis_graph.backends.html import HTMLBackendAdapter
+from synesis_graph.backends.neo4j import SyncMode
 from synesis_graph.config import (
     BACKEND_ARCADEDB,
     BACKEND_ARCADEDB_EMBEDDED,
@@ -224,6 +225,8 @@ def run_pipeline(
     extra_projects: list[Path] | None = None,
     vector_embeddings: list[str] | None = None,
     rebuild_embeddings: bool = False,
+    mode: SyncMode = "rebuild",
+    metrics: str = "all",
 ) -> PipelineResult:
     """
     Executes complete pipeline: compilation → connection → synchronization.
@@ -248,6 +251,13 @@ def run_pipeline(
             Overrides [arcadedb.embeddings].fields, as --database overrides its
             config counterpart.
         rebuild_embeddings: recompute every vector, ignoring the cached sidecar.
+        mode: `rebuild` (default) wipes the destination and rewrites it, which is
+            what every run did before this parameter existed. `update` merges the
+            payload into the existing graph without clearing — cheaper on a large
+            corpus, but it does not remove anything (see Etapa E).
+        metrics: which advanced metrics to compute — `all` (default), `fast`
+            (PageRank only) or `none`. Centrality over a large graph costs
+            minutes; this is how the researcher trades those numbers for time.
 
     Returns:
         PipelineResult indicating success or typed error.
@@ -320,6 +330,17 @@ def run_pipeline(
             error=adapter_result,
         )
     adapter = adapter_result
+    adapter.mode = mode
+    adapter.metrics = metrics
+    if mode == "update":
+        # Said plainly, and every run, because the gap is silent otherwise: a
+        # researcher who deleted coding from the project would find it still in
+        # the graph and have no reason to suspect why.
+        reporter.info(
+            "Updating in place: new and changed data will be written, but anything "
+            "removed from the project stays in the graph. Re-run without "
+            "--mode update to rebuild it from scratch."
+        )
 
     preflight_error = adapter.preflight(reporter)
     if preflight_error:

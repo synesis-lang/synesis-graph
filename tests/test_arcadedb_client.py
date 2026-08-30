@@ -18,7 +18,9 @@ from typing import Any
 import pytest
 
 from synesis_graph.arcadedb_client import (
+    CONNECT_RETRY_ATTEMPTS,
     SESSION_HEADER,
+    TRANSIENT_GATEWAY_STATUSES,
     ArcadeDBClient,
     ArcadeDBError,
 )
@@ -247,20 +249,104 @@ def test_error_field_in_a_200_body_is_still_an_error(fake_http):
         make_client().command("MATCH (n) RETURN n")
 
 
+def _no_wait(client):
+    """Drives the connect-retry path without paying its backoff."""
+    client.retry_backoff_scale = 0.0
+    return client
+
+
 def test_unreachable_server_names_the_uri(fake_http):
-    fake_http([urllib.error.URLError("connection refused")])
+    # One per attempt: a connection that never opened is retried, so the fake
+    # has to answer as many times as the client tries.
+    fake_http([urllib.error.URLError("connection refused")] * CONNECT_RETRY_ATTEMPTS)
 
     with pytest.raises(ArcadeDBError) as excinfo:
-        make_client().command("MATCH (n) RETURN n")
+        _no_wait(make_client()).command("MATCH (n) RETURN n")
 
     assert ARCADEDB_URI in str(excinfo.value)
+
+
+def test_a_refused_connection_is_retried_then_reported(fake_http):
+    """Nothing reached the database, so repeating is safe whatever the statement.
+
+    This is the case the real server produced: it stopped accepting connections
+    under load and recovered on its own within a minute. Without the retry, that
+    minute is a failed export of a corpus that takes minutes to write.
+    """
+    recorder = fake_http([urllib.error.URLError("connection refused")] * CONNECT_RETRY_ATTEMPTS)
+
+    with pytest.raises(ArcadeDBError) as excinfo:
+        _no_wait(make_client()).command("MATCH (n) RETURN n")
+
+    assert len(recorder.calls) == CONNECT_RETRY_ATTEMPTS
+    assert excinfo.value.retryable is True
+    assert excinfo.value.applied_unknown is False, "it never reached the database"
+
+
+def test_a_recovered_connection_needs_no_error(fake_http):
+    """The point of retrying: the second attempt succeeds and nobody notices."""
+    recorder = fake_http(
+        [urllib.error.URLError("connection refused"), FakeResponse({"result": [{"n": 1}]})]
+    )
+
+    rows = _no_wait(make_client()).command("MATCH (n) RETURN n")
+
+    assert rows == [{"n": 1}]
+    assert len(recorder.calls) == 2
 
 
 def test_timeout_is_reported_as_such(fake_http):
     fake_http([TimeoutError("timed out")])
 
-    with pytest.raises(ArcadeDBError, match="timed out"):
+    with pytest.raises(ArcadeDBError, match="did not answer"):
         make_client(timeout=1.0).command("MATCH (n) RETURN n")
+
+
+def test_a_timeout_is_not_retried_because_the_outcome_is_unknown(fake_http):
+    """The server may have applied it and lost only the reply.
+
+    Repeating the statement alone could write it twice, and a `rebuild` writes
+    with `CREATE` — twice means duplicate vertices, not a harmless no-op. The
+    flags say so, and recovery belongs to the caller, which redoes the whole
+    transaction.
+    """
+    recorder = fake_http([TimeoutError("timed out")])
+
+    with pytest.raises(ArcadeDBError) as excinfo:
+        make_client(timeout=1.0).command("MATCH (n) RETURN n")
+
+    assert len(recorder.calls) == 1, "a request in flight must not be repeated here"
+    assert excinfo.value.retryable is True
+    assert excinfo.value.applied_unknown is True
+
+
+@pytest.mark.parametrize("status", sorted(TRANSIENT_GATEWAY_STATUSES))
+def test_a_gateway_failure_blames_the_proxy_and_is_marked_retryable(fake_http, status):
+    """502/503/504 come from the hop in front of the database, not from it.
+
+    Measured on a stock Hostinger container: the same statement 502s under load
+    and succeeds minutes later, while `/api/v1/ready` answers in 74ms throughout.
+    Calling that "Bad Gateway" sends the reader looking for a database problem
+    that is not there.
+    """
+    fake_http([urllib.error.HTTPError(ARCADEDB_URI, status, "Bad Gateway", {}, None)])
+
+    with pytest.raises(ArcadeDBError) as excinfo:
+        make_client().command("MATCH (n) RETURN n")
+
+    assert "proxy" in str(excinfo.value).lower()
+    assert excinfo.value.retryable is True
+    assert excinfo.value.applied_unknown is True
+
+
+def test_a_server_error_is_not_treated_as_transient(fake_http):
+    """500 is the database answering. Repeating a rejected statement re-rejects it."""
+    fake_http([urllib.error.HTTPError(ARCADEDB_URI, 500, "Internal Server Error", {}, None)])
+
+    with pytest.raises(ArcadeDBError) as excinfo:
+        make_client().command("MATCH (n) RETURN n")
+
+    assert excinfo.value.retryable is False
 
 
 def test_configured_timeout_reaches_urlopen(fake_http):

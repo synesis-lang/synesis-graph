@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 from synesis_graph.core import (
     DEFAULT_FULLTEXT_ANALYZER,
@@ -47,31 +47,45 @@ def sync_to_neo4j(
     session: Any,
     payload: GraphPayload,
     fulltext_analyzer: str = DEFAULT_FULLTEXT_ANALYZER,
+    mode: SyncMode = "rebuild",
 ) -> SyncError | None:
     """
     Synchronizes payload with Neo4j in a single transaction.
 
-    Clears the database completely before synchronizing, ensuring that
-    the compiler is the source of truth.
+    In `rebuild` (the default, and what every caller did before the mode
+    existed) the database is cleared first, so the compiler is the source of
+    truth. In `update` nothing is cleared: the payload is merged into whatever
+    is already there, which is what makes an incremental load possible on a
+    corpus too large to rewrite.
 
     Args:
         session: Active Neo4j session
         payload: Data prepared for persistence
+        mode: `rebuild` wipes and rewrites; `update` merges in place.
 
     Returns:
         None on success, SyncError on failure.
     """
     try:
-        # Clear database before synchronizing (source of truth = compiler)
-        clear_database(session)
+        # Clear database before synchronizing (source of truth = compiler).
+        # Skipped in update, where the existing graph IS part of the truth.
+        if mode == "rebuild":
+            clear_database(session)
         _create_constraints(
             session,
             payload.graph_fields,
             payload.concept_label,
             list(payload.entities.keys()),
         )
-        _create_search_indexes(session, payload, fulltext_analyzer)
-        _execute_sync_transaction(session, payload)
+        # Constraints are `IF NOT EXISTS`, so they are safe to re-assert in both
+        # modes. The full-text indexes are not: `_create_search_indexes` DROPs
+        # and recreates, which in update would reindex the entire existing graph
+        # to arrive at the index it already had. The analyzer cannot have changed
+        # without `rebuild` (the pipeline refuses it), so there is nothing to
+        # apply — and Neo4j keeps an existing index up to date as rows arrive.
+        if mode == "rebuild":
+            _create_search_indexes(session, payload, fulltext_analyzer)
+        _execute_sync_transaction(session, payload, mode)
         return None
     except Exception as e:
         return SyncError(message="Synchronization failed", stage="sync", details=str(e))
@@ -181,17 +195,28 @@ def _create_search_indexes(
         _create("source_search", "(s:Source)", source_props)
 
 
-def _execute_sync_transaction(session: Any, payload: GraphPayload) -> None:
-    """Executes all sync operations in a single transaction."""
+def _execute_sync_transaction(
+    session: Any, payload: GraphPayload, mode: SyncMode = "rebuild"
+) -> None:
+    """Executes all sync operations in a single transaction.
+
+    `mode` defaults to `"rebuild"` because both backends call `clear_database`
+    immediately before this function (`sync_to_neo4j`, `sync_to_arcadedb`), so
+    the destination is known to be empty. This is the only place in the module
+    that can know that, which is why the `_sync_*` functions themselves default
+    to the conservative `"update"` instead.
+    """
     with session.begin_transaction() as tx:
         # First, and inside the transaction: the context describes this snapshot,
         # so it must not outlive a sync that failed halfway. It depends on no
         # other node, hence the position.
-        _sync_project_context(tx, payload.project_context)
-        _sync_sources(tx, payload.sources)
-        _sync_items(tx, payload.items)
+        _sync_project_context(tx, payload.project_context, mode)
+        _sync_sources(tx, payload.sources, mode=mode)
+        _sync_items(tx, payload.items, mode=mode)
         _sync_from_source(tx, payload.from_source)
-        _sync_concepts(tx, payload.chains, payload.concepts, payload.concept_label)
+        _sync_concepts(
+            tx, payload.chains, payload.concepts, payload.concept_label, mode=mode
+        )
         _sync_taxonomies(tx, payload.concepts, payload.graph_fields, payload.concept_label)
         _sync_mentions(tx, payload.mentions, payload.concept_label)
         # Reified identities must exist before the edges that point at them.
@@ -200,7 +225,9 @@ def _execute_sync_transaction(session: Any, payload: GraphPayload) -> None:
         tx.commit()
 
 
-def _sync_project_context(tx: Any, context: ProjectContextSpec | None) -> None:
+def _sync_project_context(
+    tx: Any, context: ProjectContextSpec | None, mode: SyncMode = "rebuild"
+) -> None:
     """Writes the project's own context as a single `ProjectContext` vertex.
 
     This is what makes the exported graph self-describing. Without it a consumer
@@ -209,16 +236,26 @@ def _sync_project_context(tx: Any, context: ProjectContextSpec | None) -> None:
     supposed to code the field — all of it declared in the template and, until
     now, dropped at export time.
 
-    `CREATE`, not `MERGE`: both backends wipe the graph before syncing (see
+    `CREATE`, not `MERGE`, in rebuild: both backends wipe the graph first (see
     `clear_database`), so a single instance is guaranteed by the mechanism that
-    already exists. A `MERGE` here would imply a uniqueness key this vertex does
+    already exists. A `MERGE` there would imply a uniqueness key this vertex does
     not need.
+
+    **In update it must delete first.** Nothing was wiped, so a plain `CREATE`
+    would leave a second `ProjectContext` beside the old one, and every consumer
+    that reads the context — the MCP client above all — would get two conflicting
+    descriptions of the same graph with no way to tell which is current. Deleting
+    then creating keeps the "exactly one" invariant that the vertex's readers
+    assume, and refreshes the counts, which is the point of re-syncing it.
 
     `context is None` for hand-built payloads, which carry no project to
     describe; writing nothing is the correct outcome, not an error.
     """
     if context is None:
         return
+    if mode == "update":
+        tx.run("MATCH (p:ProjectContext) DETACH DELETE p")
+    # Sem lote de propósito: escreve um único vértice.
     tx.run(
         """
         CREATE (p:ProjectContext)
@@ -228,49 +265,169 @@ def _sync_project_context(tx: Any, context: ProjectContextSpec | None) -> None:
     )
 
 
-def _sync_sources(tx: Any, sources: list[dict[str, Any]]) -> None:
-    """Synchronizes Source nodes (corresponding to SOURCE...END SOURCE block)."""
-    if not sources:
+#: How a sync should treat rows that may already be in the destination.
+#:
+#: `"rebuild"` means the caller has just emptied the graph, so a vertex whose
+#: key the payload guarantees to be unique can be written with `CREATE` — no
+#: index lookup per row. `"update"` means the destination may hold anything, so
+#: every write must deduplicate with `MERGE`.
+#:
+#: This only ever applies where the payload itself is measured to be unique:
+#: `items` (246,588 rows, 0 duplicate keys), `sources` (2,981, 0) and the
+#: ontology `concepts` (22,585, 0). Chains and taxonomies stay on `MERGE` in
+#: both modes — see `_sync_concepts` and `_sync_taxonomies`, where the dedup is
+#: doing real work rather than guarding against an accident.
+SyncMode = Literal["rebuild", "update"]
+
+#: The default everywhere is `"update"`, i.e. today's behaviour, so that no
+#: caller changes what it does by not being updated. `rebuild` is opted into
+#: explicitly by `_execute_sync_transaction`, which runs right after
+#: `clear_database` in both backends and is the one place that can know the
+#: destination is empty.
+DEFAULT_SYNC_MODE: SyncMode = "update"
+
+
+def _write_clause(mode: SyncMode, pattern: str) -> str:
+    """`CREATE <pattern>` in rebuild, `MERGE <pattern>` in update.
+
+    Exists so the choice is made in exactly one place and reads the same at
+    every call site. `MERGE` costs an index lookup per row against an index that
+    grows as the load proceeds, which is why a real corpus degrades
+    quadratically: 10,000 nodes in 22.2s, 40,000 in 472.8s — extrapolating to
+    roughly five hours for the 246,588-item Quinto Andar corpus. The same load
+    with `CREATE` measured 12x faster.
+
+    Safe only because the caller has just emptied the graph. Getting that wrong
+    does not corrupt anything subtly — it duplicates vertices, which the
+    integration tests count.
+    """
+    return f"{'CREATE' if mode == 'rebuild' else 'MERGE'} {pattern}"
+
+
+#: Rows per `UNWIND` when no caller says otherwise. Deliberately far above any
+#: corpus Synesis has produced (the largest measured is 246,588 items), so the
+#: Neo4j path keeps making exactly one call per sync function and its behaviour
+#: is unchanged. The ArcadeDB backend passes a much smaller value — see
+#: `_run_in_batches` for why that server needs one.
+DEFAULT_SYNC_BATCH_SIZE = 50_000
+
+
+def _run_in_batches(
+    tx: Any, query: str, rows: list[dict[str, Any]], batch_size: int
+) -> None:
+    """Runs `query` over `rows`, split into slices of at most `batch_size`.
+
+    Exists because a single `UNWIND $rows` holding an entire corpus is what a
+    Neo4j server shrugs off and an ArcadeDB container on a small VPS cannot: a
+    real sync of 246,588 items against a 2-vCPU/8GB Hostinger box drove the JVM
+    to 205% CPU and 79.7% of its heap, and a scaling test on that same server
+    pinned the failure between 2,000 and 5,000 rows in one transaction — the
+    non-linear jump from 500 rows (1.35s) to 2,000 rows (13.1s) is the signature
+    of GC under pressure, not of network or proxy timeouts (both measured and
+    ruled out first). See arcadedb_batch_sync_study.md for the full trail.
+
+    `batch_size` has no effect when `len(rows) <= batch_size`: exactly one call
+    to `tx.run` is made, with the full list — identical to calling `tx.run`
+    directly, so a default large enough for ordinary Neo4j corpora costs
+    nothing there.
+
+    Empty `rows` makes no call at all, matching every `_sync_*` function's own
+    "nothing to do" guard.
+    """
+    if not rows:
         return
-    tx.run(
-        """
+    for start in range(0, len(rows), batch_size):
+        tx.run(query, rows=rows[start : start + batch_size])
+
+
+def ontology_concept_rows(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The property dicts `_sync_concepts` writes for the ontology's concepts.
+
+    Extracted so the bulk-load path (`backends/arcadedb.py`) writes exactly the
+    same rows as the Cypher path. Two copies of "which concepts get written, and
+    with which properties" would be free to disagree, and the disagreement would
+    show up as a graph that differs depending on which path ran — the one thing
+    the two-path design must never allow.
+
+    Concepts without a `name` are skipped: `name` is the vertex's identity, and
+    the UNIQUE index rejects a null one.
+    """
+    rows: list[dict[str, Any]] = []
+    for row in concepts:
+        props = row.get("props", {})
+        if isinstance(props, dict) and props.get("name"):
+            rows.append(props)
+    return rows
+
+
+def _sync_sources(
+    tx: Any,
+    sources: list[dict[str, Any]],
+    batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
+    mode: SyncMode = DEFAULT_SYNC_MODE,
+) -> None:
+    """Synchronizes Source nodes (corresponding to SOURCE...END SOURCE block).
+
+    `bibtex` is unique per source by construction — the compiler keys the
+    bibliography by it — so `rebuild` may `CREATE` (see `_write_clause`).
+    """
+    _run_in_batches(
+        tx,
+        f"""
         UNWIND $rows AS row
-        MERGE (s:Source {bibtex: row.bibtex})
+        {_write_clause(mode, "(s:Source {bibtex: row.bibtex})")}
         SET s = row, s.last_updated = timestamp()
     """,
-        rows=sources,
+        sources,
+        batch_size,
     )
 
 
-def _sync_items(tx: Any, items: list[dict[str, Any]]) -> None:
-    if not items:
-        return
-    tx.run(
-        """
+def _sync_items(
+    tx: Any,
+    items: list[dict[str, Any]],
+    batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
+    mode: SyncMode = DEFAULT_SYNC_MODE,
+) -> None:
+    """`item_id` is unique per item by construction, so `rebuild` may `CREATE`.
+
+    This is the function the 12x measurement was taken on: it carries the
+    largest collection in any Synesis corpus by an order of magnitude.
+    """
+    _run_in_batches(
+        tx,
+        f"""
         UNWIND $rows AS row
-        MERGE (i:Item {item_id: row.item_id})
+        {_write_clause(mode, "(i:Item {item_id: row.item_id})")}
         SET i = row, i.last_updated = timestamp()
     """,
-        rows=items,
+        items,
+        batch_size,
     )
 
 
-def _sync_from_source(tx: Any, from_source: list[dict[str, Any]]) -> None:
+def _sync_from_source(
+    tx: Any, from_source: list[dict[str, Any]], batch_size: int = DEFAULT_SYNC_BATCH_SIZE
+) -> None:
     """Connects Item to the Source from which it was extracted."""
-    if not from_source:
-        return
-    tx.run(
+    _run_in_batches(
+        tx,
         """
         UNWIND $rows AS row
         MATCH (i:Item {item_id: row.item_id})
         MATCH (s:Source {bibtex: row.ref})
         MERGE (i)-[:FROM_SOURCE]->(s)
     """,
-        rows=from_source,
+        from_source,
+        batch_size,
     )
 
 
-def _sync_entities(tx: Any, entities: dict[str, list[dict[str, Any]]]) -> None:
+def _sync_entities(
+    tx: Any,
+    entities: dict[str, list[dict[str, Any]]],
+    batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
+) -> None:
     """Creates reified identity nodes from IDENTIFIES (multi-project linkage).
 
     One node per distinct primary-key value, labelled with the entity name
@@ -285,7 +442,8 @@ def _sync_entities(tx: Any, entities: dict[str, list[dict[str, Any]]]) -> None:
     for label, rows in entities.items():
         if not rows or not validate_cypher_label(label):
             continue
-        tx.run(
+        _run_in_batches(
+            tx,
             f"""
             UNWIND $rows AS row
             MERGE (e:{label} {{entity_id: row.entity_id}})
@@ -297,11 +455,16 @@ def _sync_entities(tx: Any, entities: dict[str, list[dict[str, Any]]]) -> None:
             MATCH (s:Source {{bibtex: row.source_bibtex}})
             MERGE (s)-[:IDENTIFIED_AS]->(e)
         """,
-            rows=rows,
+            rows,
+            batch_size,
         )
 
 
-def _sync_refers_to(tx: Any, refers_to_edges: dict[str, list[dict[str, Any]]]) -> None:
+def _sync_refers_to(
+    tx: Any,
+    refers_to_edges: dict[str, list[dict[str, Any]]],
+    batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
+) -> None:
     """Creates (:Source)-[:REFERS_TO {entity}]->(:<Entity>) edges.
 
     The entity label rides as a relationship property rather than becoming part
@@ -314,7 +477,8 @@ def _sync_refers_to(tx: Any, refers_to_edges: dict[str, list[dict[str, Any]]]) -
     for label, rows in refers_to_edges.items():
         if not rows or not validate_cypher_label(label):
             continue
-        tx.run(
+        _run_in_batches(
+            tx,
             f"""
             UNWIND $rows AS row
             MATCH (s:Source {{bibtex: row.from_bibtex}})
@@ -322,7 +486,8 @@ def _sync_refers_to(tx: Any, refers_to_edges: dict[str, list[dict[str, Any]]]) -
             MERGE (s)-[r:{REFERS_TO_RELATION}]->(e)
             SET r.entity = row.entity, r.member = row.member
         """,
-            rows=rows,
+            rows,
+            batch_size,
         )
 
 
@@ -341,7 +506,11 @@ def _get_taxonomy_relation(field_name: str) -> str:
 
 
 def _sync_taxonomies(
-    tx: Any, concepts: list[dict[str, Any]], graph_fields: list[str], concept_label: str
+    tx: Any,
+    concepts: list[dict[str, Any]],
+    graph_fields: list[str],
+    concept_label: str,
+    batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
 ) -> None:
     """
     Creates taxonomy nodes and semantic relationships from concept nodes.
@@ -353,6 +522,12 @@ def _sync_taxonomies(
     - Topic -> Topic via IS_LINKED_TO (self-referential)
     - Topic -> Aspect via MAPPED_TO_ASPECT
     - Topic -> Dimension via MAPPED_TO_DIMENSION
+
+    Takes no `mode`, on purpose: MERGE nos dois modos. A taxonomy value is
+    shared by design — one `topic` covers many concepts — so the `MERGE` here is
+    what turns thousands of mentions of "Lideranca" into the single Topic node
+    the researcher expects to click on. There is no rebuild shortcut available,
+    because the duplication is in the payload rather than in the destination.
     """
     if not concepts:
         return
@@ -394,7 +569,7 @@ def _sync_taxonomies(
             MERGE (t:{label} {{name: val}})
             MERGE (c)-[:{rel_type}]->(t)
         """
-        tx.run(query, rows=relation_rows)
+        _run_in_batches(tx, query, relation_rows, batch_size)
 
     # Second: create mapping relations between taxonomies
     # Topic -> Aspect (MAPPED_TO_ASPECT)
@@ -416,7 +591,8 @@ def _sync_taxonomies(
                 mapping_rows.append({"topics": topics, "aspects": aspects})
 
         if mapping_rows:
-            tx.run(
+            _run_in_batches(
+                tx,
                 """
                 UNWIND $rows AS row
                 UNWIND row.topics AS topic_val
@@ -425,7 +601,8 @@ def _sync_taxonomies(
                 MATCH (aspect:Aspect {name: aspect_val})
                 MERGE (topic)-[:MAPPED_TO_ASPECT]->(aspect)
             """,
-                rows=mapping_rows,
+                mapping_rows,
+                batch_size,
             )
 
     # Topic -> Dimension (MAPPED_TO_DIMENSION)
@@ -447,7 +624,8 @@ def _sync_taxonomies(
                 mapping_rows.append({"topics": topics, "dimensions": dimensions})
 
         if mapping_rows:
-            tx.run(
+            _run_in_batches(
+                tx,
                 """
                 UNWIND $rows AS row
                 UNWIND row.topics AS topic_val
@@ -456,13 +634,17 @@ def _sync_taxonomies(
                 MATCH (dimension:Dimension {name: dimension_val})
                 MERGE (topic)-[:MAPPED_TO_DIMENSION]->(dimension)
             """,
-                rows=mapping_rows,
+                mapping_rows,
+                batch_size,
             )
 
     # Topic -> Topic (IS_LINKED_TO) - connects topics via RELATES_TO between their concepts
     # strength = number of RELATES_TO relations between concepts of both topics
     if "topic" in graph_fields:
         cl = concept_label
+        # Sem lote de propósito: esta é uma agregação server-side sobre dados
+        # já gravados, não um `UNWIND $rows`. Não há lista a fatiar — o custo
+        # é da travessia, e dividi-la mudaria o `count(*)` de cada grupo.
         tx.run(
             f"MATCH (t1:Topic)<-[:GROUPED_BY]-(f1:{cl})-[:RELATES_TO]->(f2:{cl})"
             "-[:GROUPED_BY]->(t2:Topic) "
@@ -473,23 +655,33 @@ def _sync_taxonomies(
         )
 
 
-def _sync_mentions(tx: Any, mentions: list[dict[str, Any]], concept_label: str) -> None:
+def _sync_mentions(
+    tx: Any,
+    mentions: list[dict[str, Any]],
+    concept_label: str,
+    batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
+) -> None:
     """Connects Item to mentioned concept nodes."""
-    if not mentions:
-        return
-    tx.run(
+    _run_in_batches(
+        tx,
         f"""
         UNWIND $rows AS row
         MATCH (i:Item {{item_id: row.item_id}})
         MATCH (c:{concept_label} {{name: row.concept}})
         MERGE (i)-[:MENTIONS {{mention_order: row.mention_order}}]->(c)
     """,
-        rows=mentions,
+        mentions,
+        batch_size,
     )
 
 
 def _sync_concepts(
-    tx: Any, chains: list[dict[str, Any]], concepts: list[dict[str, Any]], concept_label: str
+    tx: Any,
+    chains: list[dict[str, Any]],
+    concepts: list[dict[str, Any]],
+    concept_label: str,
+    batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
+    mode: SyncMode = DEFAULT_SYNC_MODE,
 ) -> None:
     """
     Creates concept nodes (dynamic label based on CHAIN/CODE field) and RELATES_TO relations.
@@ -500,42 +692,53 @@ def _sync_concepts(
 
     The RELATES_TO relation connects concepts with type and description as
     edge attributes (only for templates with CHAIN field).
+
+    `mode` reaches only the first of the three statements. The ontology declares
+    each concept once (22,585 rows, 0 duplicate names measured on the real
+    corpus), so that one may `CREATE` in rebuild. The two chain statements
+    cannot: 302,392 chain endpoints resolve to 22,553 distinct concepts, each
+    named about thirteen times, and their `MERGE` is what collapses the
+    repetition. Turning those into `CREATE` would multiply the concept nodes by
+    roughly thirteen and silently corrupt every traversal.
     """
     # First: create concept nodes from ontology
     if concepts:
-        concept_rows: list[dict[str, Any]] = []
-        for row in concepts:
-            props = row.get("props", {})
-            if isinstance(props, dict) and props.get("name"):
-                concept_rows.append(props)
+        concept_rows = ontology_concept_rows(concepts)
 
-        tx.run(
+        _run_in_batches(
+            tx,
             f"""
             UNWIND $rows AS row
-            MERGE (c:{concept_label} {{name: row.name}})
+            {_write_clause(mode, f"(c:{concept_label} {{name: row.name}})")}
             SET c = row
         """,
-            rows=concept_rows,
+            concept_rows,
+            batch_size,
         )
 
     # If there are no chains, nothing more to do
     if not chains:
         return
 
-    # Second: create concept nodes from chains that don't exist in ontology
-    tx.run(
+    # Second: create concept nodes from chains that don't exist in ontology.
+    # MERGE nos dois modos de propósito: a mesma chave chega ~13x aqui, e é
+    # este MERGE que a deduplica. Ver a docstring.
+    _run_in_batches(
+        tx,
         f"""
         UNWIND $rows AS row
         MERGE (s:{concept_label} {{name: row.source}})
         MERGE (t:{concept_label} {{name: row.target}})
     """,
-        rows=chains,
+        chains,
+        batch_size,
     )
 
     # Third: create RELATES_TO relations with attributes
     # type is part of the MERGE key so that the same concept pair can have
     # multiple edges of different types (e.g. APPLICATION and METHODOLOGICAL)
-    tx.run(
+    _run_in_batches(
+        tx,
         f"""
         UNWIND $rows AS row
         MATCH (s:{concept_label} {{name: row.source}})
@@ -544,5 +747,6 @@ def _sync_concepts(
         SET r.description = row.description,
             r.item_id = row.item_id
     """,
-        rows=chains,
+        chains,
+        batch_size,
     )

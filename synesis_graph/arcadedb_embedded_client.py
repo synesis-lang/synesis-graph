@@ -146,6 +146,35 @@ def _quiet_jvm_args() -> list[str]:
         return []
 
 
+def missing_embedded_engine_advice() -> str:
+    """What to tell someone whose machine cannot run the local graph engine.
+
+    The distinction matters because on one platform the answer is "reinstall"
+    and on another it is "this will never work here", and telling an Intel Mac
+    owner to reinstall sends them round a loop that cannot end. `arcadedb-embedded`
+    publishes wheels for Linux (x86_64/ARM64), Windows (x86_64) and macOS on
+    Apple Silicon only, and ships no source distribution — so there is nothing
+    for pip to build from on an Intel Mac.
+
+    The other backends work fine there, which is the point worth making: this is
+    one backend being unavailable, not the tool.
+    """
+    import platform
+
+    if platform.system() == "Darwin" and platform.machine() not in ("arm64", "aarch64"):
+        return (
+            "The local graph engine has no build for Intel Macs — it is published "
+            "for Apple Silicon only. Nothing can be installed to fix this on this "
+            "machine. The other backends are unaffected: use 'synesis-graph "
+            "arcadedb' against a server, or 'synesis-graph html' for a "
+            "self-contained visualisation."
+        )
+    return (
+        "The 'arcadedb-embedded' package ships with synesis-graph. "
+        "Reinstall with: pip install --force-reinstall synesis-graph"
+    )
+
+
 class ArcadeDBEmbeddedClient:
     """An `ArcadeDBTransport` backed by the in-process engine.
 
@@ -186,10 +215,7 @@ class ArcadeDBEmbeddedClient:
         except ImportError as e:  # pragma: no cover - exercised by the adapter
             raise ArcadeDBError(
                 "The local graph engine is not available",
-                detail=(
-                    "The 'arcadedb-embedded' package ships with synesis-graph. "
-                    "Reinstall with: pip install --force-reinstall synesis-graph"
-                ),
+                detail=missing_embedded_engine_advice(),
             ) from e
 
         try:
@@ -249,6 +275,54 @@ class ArcadeDBEmbeddedClient:
             raise ArcadeDBError("The embedded database is closed")
         return self._db
 
+    # -- bulk vertex loading -----------------------------------------------
+    def supports_bulk_vertices(self) -> bool:
+        """Whether this engine offers ArcadeDB's GraphBatch API.
+
+        GraphBatch arrived in ArcadeDB 26.3.2. An older engine simply does not
+        have it, and the caller falls back to ordinary Cypher writes, which are
+        slower but produce the same graph — so this is a capability question,
+        never an error.
+        """
+        return self._db is not None and hasattr(self._db, "graph_batch")
+
+    def bulk_create_vertices(self, type_name: str, rows: list[dict[str, Any]]) -> int:
+        """Writes vertices through GraphBatch, bypassing the transaction layer.
+
+        Returns how many were written.
+
+        **Must not be called inside an open transaction.** GraphBatch consumes
+        it: measured against the real engine, the vertices are written but the
+        following `commit()` fails with `TransactionException: Transaction not
+        begun`. That is the same "bypasses the transactional layer by design"
+        property that makes it fast, and it is why the caller runs this before
+        opening its own transaction rather than inside one.
+
+        **Only safe against a destination that cannot already hold these keys.**
+        GraphBatch does not deduplicate — it is `CREATE`, never `MERGE`. Over a
+        UNIQUE index a repeated key raises `DuplicatedKeyException` and aborts
+        the batch, which is the loud failure we want: the rule "bulk load only
+        in rebuild" is then enforced by the engine rather than by trust.
+
+        Edges are deliberately not written here. The endpoints resolve perfectly
+        well through the existing Cypher `MATCH` on the UNIQUE index once the
+        vertices exist, so there is no need to hold a key-to-RID map for the
+        whole corpus (272,154 entries on the real one) as the design first
+        assumed.
+        """
+        if not rows:
+            return 0
+        db = self._require_db()
+        batch = db.graph_batch()
+        try:
+            batch.create_vertices(type_name, rows)
+            batch.flush()
+        except Exception as e:
+            raise self._translate(e, f"bulk insert into {type_name}") from e
+        finally:
+            batch.close()
+        return len(rows)
+
     # -- queries and commands ----------------------------------------------
     def command(
         self,
@@ -257,11 +331,14 @@ class ArcadeDBEmbeddedClient:
         *,
         language: str = "cypher",
         database: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Executes a statement that may modify data or schema.
 
         `database` is accepted for signature compatibility and ignored: an
-        embedded client is bound to one database for its lifetime.
+        embedded client is bound to one database for its lifetime. So is
+        `limit`: the row cap it lifts belongs to the HTTP server's response
+        encoding, and an in-process call returns whatever the engine produced.
         """
         db = self._require_db()
         try:
@@ -276,8 +353,13 @@ class ArcadeDBEmbeddedClient:
         *,
         language: str = "cypher",
         database: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Executes a read-only statement."""
+        """Executes a read-only statement.
+
+        `limit` is accepted and ignored, as in `command`: there is no response
+        cap to lift when nothing is serialised over a wire.
+        """
         db = self._require_db()
         try:
             return self._materialize(db.query(language, statement, *self._args(params)))

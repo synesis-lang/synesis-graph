@@ -62,7 +62,7 @@ class FakeClient:
         self._concept_rows = concept_rows if concept_rows is not None else []
         self.fail_on: str | None = None
 
-    def command(self, statement, params=None, *, language="cypher", database=None):
+    def command(self, statement, params=None, *, language="cypher", database=None, limit=None):
         if self.fail_on and self.fail_on in statement:
             raise ArcadeDBError(f"forced failure: {self.fail_on}")
         self.statements.append((statement, params))
@@ -70,10 +70,13 @@ class FakeClient:
             return list(self._algo_rows)
         return []
 
-    def query(self, statement, params=None, *, language="cypher", database=None):
+    def query(self, statement, params=None, *, language="cypher", database=None, limit=None):
         self.statements.append((statement, params))
         if "@rid" in statement:
             return list(self._concept_rows)
+        if "count(n)" in statement:
+            # The vertex count that feeds the duration estimate.
+            return [{"n": len(self._concept_rows)}]
         return []
 
     def writes(self) -> list[tuple[str, dict | None]]:

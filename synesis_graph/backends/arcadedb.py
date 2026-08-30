@@ -19,11 +19,13 @@ what genuinely differs:
 from __future__ import annotations
 
 import logging
-from typing import Any
+import time
+from typing import Any, Protocol
 
 from synesis_graph.arcadedb_client import ArcadeDBError
 from synesis_graph.arcadedb_transport import ArcadeDBTransport
 from synesis_graph.backends.neo4j import (
+    SyncMode,
     _sync_concepts,
     _sync_entities,
     _sync_from_source,
@@ -33,6 +35,7 @@ from synesis_graph.backends.neo4j import (
     _sync_refers_to,
     _sync_sources,
     _sync_taxonomies,
+    ontology_concept_rows,
 )
 from synesis_graph.core import (
     DEFAULT_ARCADEDB_ANALYZER,
@@ -123,42 +126,361 @@ class _CypherRunner:
         return self._client.command(query, params or None)
 
 
+#: Context properties that describe how the graph's INDEXES were built, paired
+#: with the human name of the setting that produces each. An `update` cannot
+#: change any of them: it does not drop indexes, so a new analyzer or a new
+#: embedding model would be declared on the context while the index kept
+#: answering under the old one — the graph would advertise a capability it does
+#: not have, which is worse than refusing.
+_REBUILD_ONLY_SETTINGS: tuple[tuple[str, str], ...] = (
+    ("fulltext_analyzer", "fulltext_analyzer"),
+    ("embedding_model", "the embeddings model"),
+    ("embedding_fields", "the embedded fields"),
+)
+
+
+def read_project_context(client: ArcadeDBTransport) -> dict[str, Any] | None:
+    """Returns the stored `ProjectContext` properties, or None if there is none.
+
+    None covers both "this database is empty" and "this graph predates the
+    context vertex". Neither is an error: the first is an initial load, and the
+    second simply has nothing to compare against.
+    """
+    try:
+        rows = client.command("MATCH (p:ProjectContext) RETURN p LIMIT 1")
+    except Exception:  # noqa: BLE001 - see below
+        # A missing `ProjectContext` type is not a failure to report — it is the
+        # empty case, and it is what an empty or older database looks like.
+        # Deliberately broader than `ArcadeDBError`: how a nonexistent type
+        # surfaces differs between the HTTP and embedded transports, and the
+        # only consequence of catching too much here is falling back to "no
+        # stored context", which is the safe answer. The caller re-runs the real
+        # query moments later, so a genuine connection problem still surfaces.
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    stored = row.get("p", row)
+    return stored if isinstance(stored, dict) else None
+
+
+def incompatible_with_update(
+    stored: dict[str, Any] | None, payload: GraphPayload
+) -> list[str]:
+    """Names the settings that changed and that `update` cannot apply.
+
+    Compares what the destination says it was built with against what this run
+    declares. Empty list means the update is safe to proceed with.
+
+    Reads the answer off the graph rather than off any local state, because the
+    graph is the only thing that knows what it actually contains — a config file
+    can be edited between runs, and a second researcher may have loaded it from
+    another machine entirely.
+
+    A stored value that is empty is treated as "not declared", not as a change:
+    graphs built before a capability existed carry blanks, and refusing those
+    would block updates on every older database for no reason.
+    """
+    if not stored or payload.project_context is None:
+        return []
+    wanted = payload.project_context
+    changed = []
+    for prop, human in _REBUILD_ONLY_SETTINGS:
+        was = str(stored.get(prop) or "")
+        now = str(getattr(wanted, prop, "") or "")
+        if was and now and was != now:
+            changed.append(f"{human}: graph has '{was}', this run asks for '{now}'")
+    return changed
+
+
+class ProgressReporter(Protocol):
+    """The one thing this layer needs in order to speak to the researcher.
+
+    Narrower than `TaskReporter` on purpose, and structural rather than
+    imported: the sync layer reports outcomes by returning typed errors, and
+    taking a whole UI object as a dependency to print two sentences would invert
+    that. Anything with `info` and `warning` satisfies it, including `None`
+    handling at the call site for the many callers that have no UI at all.
+    """
+
+    def info(self, msg: str) -> None: ...
+
+    def warning(self, msg: str) -> None: ...
+
+
+#: How many times a whole sync is attempted when a transient failure interrupts
+#: it. Two retries: the observed outages recovered within a minute, and a longer
+#: ladder mostly delays an honest error on a corpus that takes minutes per try.
+SYNC_RETRY_ATTEMPTS = 3
+
+#: Pause before starting a sync over. Long enough for a proxy or a server under
+#: memory pressure to settle — the real one stopped accepting connections and
+#: recovered on its own inside a minute — and short next to the sync itself.
+_RETRY_BACKOFF_SECONDS = 5.0
+
+
+#: Above this many items the sync takes long enough that silence needs
+#: explaining. Set from measurement, not taste: 40,000 items synced against a
+#: real server in ~64s, while 246,588 took 282s. Below the threshold the wait is
+#: short enough that a warning would be noise.
+_SLOW_SYNC_ITEM_COUNT = 50_000
+
+#: Rows per second observed end-to-end against the Hostinger container, used
+#: only to turn a row count into a rough minute figure. Deliberately pessimistic
+#: — an estimate that runs short reads as a stall.
+_OBSERVED_ITEMS_PER_SECOND = 700
+
+
+def announce_scale(
+    payload: GraphPayload,
+    embeddings: EmbeddingsSidecar | None,
+    say: Any,
+) -> None:
+    """Warns, before the silence starts, that this will take a while.
+
+    The whole sync runs in one transaction, so nothing is visible in the
+    database until it commits — a researcher who opens the graph to check
+    progress sees an empty or unchanged one for minutes. Combined with a
+    terminal that prints nothing, that is indistinguishable from a hang, and the
+    natural response is to interrupt it, which throws away all the work.
+
+    Saying the expected duration up front is what makes waiting a decision
+    rather than a guess. The estimate is rough on purpose and phrased as such:
+    a precise-looking number that proves wrong costs more trust than a vague one.
+    """
+    n = len(payload.items)
+    if n < _SLOW_SYNC_ITEM_COUNT:
+        return
+    minutes = max(1, round(n / _OBSERVED_ITEMS_PER_SECOND / 60))
+    say(
+        f"Writing {n:,} coded excerpts to the database. "
+        f"This usually takes around {minutes} minute(s) on a remote server."
+    )
+    if embeddings is not None and embeddings.vectors:
+        say(f"Then {len(embeddings.vectors):,} concept vectors, for meaning-based search.")
+    say(
+        "Nothing will be printed until it finishes, and the graph stays empty "
+        "until the very end — that is normal, not a freeze. Please leave it running."
+    )
+
+
+def _retry_is_safe(mode: SyncMode) -> bool:
+    """Whether repeating an interrupted sync can be done without duplicating.
+
+    Only in `rebuild`, and the reason is precise: a rebuild begins by clearing
+    the graph, so a second attempt starts from the same empty state as the
+    first, no matter how far the interrupted one got. That makes the whole sync
+    idempotent even though the statements inside it are not — `rebuild` writes
+    with `CREATE` (Etapa A) and bulk-loads vertices that deduplicate against
+    nothing (Etapa C).
+
+    `update` refuses on purpose. It does not clear, so a retry after a failure
+    of unknown outcome would re-apply writes that may already have landed. The
+    `MERGE` statements would absorb that, but the run is not made only of
+    `MERGE`s, and "probably fine" is not a basis for writing to a researcher's
+    corpus. An interrupted update is reported, and the researcher decides.
+    """
+    return mode == "rebuild"
+
+
+#: Rows per `UNWIND` on this backend, overriding the shared 50,000 default.
+#:
+#: The default was written for Neo4j, whose driver streams over a long-lived
+#: connection. Here every statement is one HTTP request through whatever proxy
+#: sits in front of the server, and 50,000 items serialise to **32.6 MB** — a
+#: request large enough that a stock reverse proxy drops it under load. That is
+#: the `Bad Gateway (HTTP 502)` a real 246,588-item export hit three times in a
+#: row, on a server whose own readiness probe answered in 74ms throughout.
+#:
+#: 5,000 rows is 3.3 MB, and was measured at the best throughput of the sizes
+#: tried (6,625 rows/s, against 4,917 at 50,000): smaller requests also let the
+#: server work while the next one is still arriving.
+#:
+#: This is the fix the first study specified as its Etapa 2 and that the second
+#: study replaced before it was ever implemented — the gap only became visible
+#: once the retry made the failure legible instead of fatal.
+SYNC_BATCH_SIZE = 5_000
+
+#: Vertex collections a bulk load may write, in the order the sync writes them.
+#: Each is a payload attribute whose rows carry a key the compiler guarantees to
+#: be unique — measured on the real corpus at 0 duplicates across 272,154 rows
+#: (`items` 246,588, `concepts` 22,585, `sources` 2,981).
+#:
+#: Chains and taxonomies are absent by design, and not because of their size:
+#: their rows repeat keys on purpose (302,392 chain endpoints resolve to 22,553
+#: distinct concepts), so the `MERGE` that collapses them is doing real work.
+#: A bulk load there would raise `DuplicatedKeyException` — loudly, which is the
+#: good outcome, but it would still be wrong.
+BULK_LOADABLE = ("sources", "items", "concepts")
+
+
+def _bulk_loadable_rows(
+    payload: GraphPayload, collection: str
+) -> tuple[str, list[dict[str, Any]]]:
+    """The vertex type and rows a bulk load would write for one collection."""
+    if collection == "sources":
+        return "Source", list(payload.sources)
+    if collection == "items":
+        return "Item", list(payload.items)
+    return payload.concept_label, ontology_concept_rows(payload.concepts)
+
+
+def supports_bulk_load(client: ArcadeDBTransport) -> bool:
+    """Whether this transport can bulk-load vertices.
+
+    Deliberately a duck-typed probe rather than a member of `ArcadeDBTransport`.
+    Bulk loading is not something every transport can do — the embedded engine
+    exposes ArcadeDB's GraphBatch in-process, while the HTTP client would need
+    its own `/api/v1/batch` implementation — and putting it in the Protocol would
+    oblige every transport to answer for a capability most do not have. A
+    transport that offers it advertises it; one that does not is not broken, and
+    the caller falls back to Cypher writes that build the same graph.
+    """
+    probe = getattr(client, "supports_bulk_vertices", None)
+    return bool(probe and probe())
+
+
+def _bulk_load_vertices(
+    client: ArcadeDBTransport, payload: GraphPayload, mode: SyncMode
+) -> frozenset[str]:
+    """Writes the unique-keyed vertices through GraphBatch, if it is available.
+
+    Returns the names of the collections it wrote, so the sync transaction can
+    skip them. An empty set means nothing was bulk-loaded and the ordinary path
+    must write everything — which is exactly what happens on an engine without
+    GraphBatch, and is why this returns a set rather than a boolean.
+
+    **Runs before the transaction opens, and that is not a style choice.**
+    GraphBatch consumes an open transaction: measured against the real engine,
+    the vertices land but the following `commit()` fails with
+    `TransactionException: Transaction not begun`. Bypassing the transaction
+    layer is where the speed comes from, so the two cannot be nested.
+
+    **`rebuild` only.** GraphBatch never deduplicates, so against a destination
+    that may already hold these keys it would either duplicate silently or, over
+    a UNIQUE index, abort with `DuplicatedKeyException`. In `update` the whole
+    point is that the destination already holds them.
+
+    **What it gives up.** These vertices are no longer covered by the sync
+    transaction: a failure partway leaves them written. That is acceptable here
+    and nowhere else — a rebuild already wiped the graph, the compiler is the
+    source of truth, and re-running is always safe. In `update` it would leave a
+    half-applied state nobody could reconstruct, which is the reason update stays
+    on the transactional path even though it would be faster here too.
+    """
+    if mode != "rebuild" or not supports_bulk_load(client):
+        return frozenset()
+
+    loaded: set[str] = set()
+    for collection in BULK_LOADABLE:
+        type_name, rows = _bulk_loadable_rows(payload, collection)
+        if not rows or not validate_cypher_label(type_name):
+            # Nothing to write, or a label the sanitizer rejects. Either way the
+            # ordinary path handles it — leaving it out of `loaded` is what makes
+            # this a fallback rather than a silent gap.
+            continue
+        client.bulk_create_vertices(type_name, rows)  # type: ignore[attr-defined]
+        loaded.add(collection)
+    return frozenset(loaded)
+
+
 def sync_to_arcadedb(
     client: ArcadeDBTransport,
     payload: GraphPayload,
     fulltext_analyzer: str = DEFAULT_ARCADEDB_ANALYZER,
     embeddings: EmbeddingsSidecar | None = None,
+    mode: SyncMode = "rebuild",
+    reporter: ProgressReporter | None = None,
 ) -> SyncError | None:
     """Synchronizes the payload with ArcadeDB.
 
-    Clears the database first, so the compiler stays the source of truth — the same
-    contract as `sync_to_neo4j`.
+    In `rebuild` the database is cleared first, so the compiler stays the source
+    of truth — the same contract as `sync_to_neo4j`. In `update` nothing is
+    cleared and the payload merges into the existing graph.
 
     `embeddings`, when given, adds the vector property, its index and the vectors
     themselves. Absent, nothing about the existing behaviour changes.
 
     Returns None on success, SyncError on failure.
     """
-    try:
-        clear_database(client)
+    def attempt() -> SyncError | None:
+        # Note the asymmetry with Neo4j: the ArcadeDB adapter ALSO clears in its
+        # own `clear_destination` step, so a rebuild through the pipeline clears
+        # twice. Harmless (the second finds an empty graph) but it means the mode
+        # has to reach both places, not just the pipeline step.
+        if mode == "rebuild":
+            clear_database(client)
+        # Idempotent in both modes: types, properties and UNIQUE indexes are all
+        # created only when absent, so re-asserting them costs a check.
         _create_schema(client, payload)
         _create_constraints(client, payload)
-        _create_search_indexes(client, payload, fulltext_analyzer)
+        # Not idempotent, and deliberately so: this DROPs and recreates, which is
+        # what makes a changed analyzer take effect. In update that would reindex
+        # the whole existing graph to land on the index it already had — and the
+        # analyzer cannot have changed, because the pipeline refuses that
+        # combination (see `_incompatible_with_update`).
+        if mode == "rebuild":
+            _create_search_indexes(client, payload, fulltext_analyzer)
         # Declared right after the indexes are built, and from the same field
         # lists — so what the context announces cannot drift from what exists.
         # Before `_execute_sync_transaction`, which is what writes the context
-        # vertex; declaring after it would announce nothing.
+        # vertex; declaring after it would announce nothing. Runs in both modes:
+        # update rewrites the context vertex, so it must carry the declaration
+        # even though it did not rebuild the index it describes.
         _declare_fulltext(payload, fulltext_analyzer)
-        _execute_sync_transaction(client, payload)
+        # Before the transaction, never inside it — see `_bulk_load_vertices`.
+        bulk_loaded = _bulk_load_vertices(client, payload, mode)
+        _execute_sync_transaction(client, payload, mode, skip=bulk_loaded)
         if embeddings is not None:
             error = _sync_embeddings(client, payload, embeddings)
             if error is not None:
                 return error
         return None
-    except ArcadeDBError as e:
-        return SyncError(message="Synchronization failed", stage="sync", details=str(e))
-    except Exception as e:  # noqa: BLE001 - surfaced to the caller as a typed error
-        return SyncError(message="Synchronization failed", stage="sync", details=str(e))
+
+    last: Exception | None = None
+    for tries_left in range(SYNC_RETRY_ATTEMPTS - 1, -1, -1):
+        try:
+            return attempt()
+        except ArcadeDBError as e:
+            last = e
+            if not (e.retryable and _retry_is_safe(mode) and tries_left):
+                break
+            # Restarting the whole sync, not the lost request. A gateway failure
+            # leaves it unknown whether the statement was applied, so repeating
+            # that one statement could write it twice; repeating the sync cannot,
+            # because a rebuild clears the graph before writing anything.
+            logger.warning("Sync interrupted, retrying: %s", e)
+            if reporter is not None:
+                # Said plainly, and without the HTTP vocabulary: the researcher
+                # did nothing wrong and there is nothing for them to fix. What
+                # they need to know is that the work restarts and no partial
+                # graph survives — otherwise a second wait of the same length
+                # reads as the tool having lost its way.
+                reporter.warning(
+                    "The server stopped responding for a moment. Starting the "
+                    f"upload over — {tries_left} more attempt(s). Nothing was "
+                    "left half-written; the database is rebuilt from scratch."
+                )
+            time.sleep(_RETRY_BACKOFF_SECONDS)
+        except Exception as e:  # noqa: BLE001 - surfaced to the caller as typed
+            last = e
+            break
+    if isinstance(last, ArcadeDBError) and last.retryable:
+        # A transient failure that outlived every retry is a different problem
+        # from a rejected statement, and the way out is different too. Saying so
+        # here saves the researcher from re-reading a stack of gateway errors
+        # looking for a mistake in their project.
+        return SyncError(
+            message="The server kept dropping the connection",
+            stage="sync",
+            details=(
+                f"{last} — this is the server or its proxy, not your project. "
+                "Nothing was left half-written. Try again when the server is "
+                "less busy; if it keeps happening, the server may need more "
+                "memory, or a longer timeout via [arcadedb].timeout."
+            ),
+        )
+    return SyncError(message="Synchronization failed", stage="sync", details=str(last))
 
 
 # ---------------------------------------------------------------------------
@@ -555,32 +877,76 @@ def clear_database(client: ArcadeDBTransport) -> None:
 # ---------------------------------------------------------------------------
 # Sync
 # ---------------------------------------------------------------------------
-def _execute_sync_transaction(client: ArcadeDBTransport, payload: GraphPayload) -> None:
+def _execute_sync_transaction(
+    client: ArcadeDBTransport,
+    payload: GraphPayload,
+    mode: SyncMode = "rebuild",
+    skip: frozenset[str] = frozenset(),
+) -> None:
     """Writes the whole payload inside one server-side transaction.
 
     The ordering matches `sync_to_neo4j` and is load-bearing: items and sources must
     exist before the edges that match on them, and reified identities before the
     REFERS_TO edges pointing at them.
+
+    `mode="rebuild"` is what `sync_to_arcadedb` passes, and it is safe there
+    because `clear_database` has just run. It matters far more on this backend
+    than on Neo4j: the `MERGE` index lookup per row is what degraded the real
+    corpus to an extrapolated five hours against the Hostinger container.
+
+    `skip` names collections a bulk load already wrote (see `_bulk_load_vertices`).
+    They are skipped by passing an empty list rather than by branching around the
+    call: every `_sync_*` function already treats an empty collection as "nothing
+    to do", so the edges that follow still run, still resolve their endpoints
+    through the same `MATCH`, and there is no second code path to keep in step.
+    Defaults to skipping nothing, so a caller that knows nothing about bulk
+    loading behaves exactly as before.
     """
+    bs = SYNC_BATCH_SIZE
+    sources = [] if "sources" in skip else payload.sources
+    items = [] if "items" in skip else payload.items
+    # Only the ontology concepts are bulk-loadable; the chains still need their
+    # own `MERGE` pass to create concepts that the ontology never declared.
+    concepts = [] if "concepts" in skip else payload.concepts
+
     tx = _CypherRunner(client)
     client.begin()
     try:
         # Same position as in `sync_to_neo4j`: first, and inside the transaction,
         # so the context never outlives a sync that failed halfway.
-        _sync_project_context(tx, payload.project_context)
-        _sync_sources(tx, payload.sources)
-        _sync_items(tx, payload.items)
-        _sync_from_source(tx, payload.from_source)
-        _sync_concepts(tx, payload.chains, payload.concepts, payload.concept_label)
-        _sync_taxonomies(tx, payload.concepts, payload.graph_fields, payload.concept_label)
-        _sync_mentions(tx, payload.mentions, payload.concept_label)
-        _sync_entities(tx, payload.entities)
-        _sync_refers_to(tx, payload.refers_to_edges)
+        _sync_project_context(tx, payload.project_context, mode)
+        _sync_sources(tx, sources, batch_size=bs, mode=mode)
+        _sync_items(tx, items, batch_size=bs, mode=mode)
+        _sync_from_source(tx, payload.from_source, batch_size=bs)
+        _sync_concepts(
+            tx, payload.chains, concepts, payload.concept_label, batch_size=bs, mode=mode
+        )
+        # `payload.concepts`, NOT the possibly-emptied `concepts`: a bulk load
+        # wrote the concept vertices, but their taxonomy edges still have to be
+        # built here, and they are derived from these same rows. Narrowing this
+        # to the local would silently drop every GROUPED_BY/QUALIFIED_BY edge.
+        _sync_taxonomies(
+            tx, payload.concepts, payload.graph_fields, payload.concept_label, batch_size=bs
+        )
+        _sync_mentions(tx, payload.mentions, payload.concept_label, batch_size=bs)
+        _sync_entities(tx, payload.entities, batch_size=bs)
+        _sync_refers_to(tx, payload.refers_to_edges, batch_size=bs)
         client.commit()
     except Exception:
-        # Leaving the transaction open would hold locks until the server expires it,
-        # and the partial graph would outlive the failure.
-        client.rollback()
+        # Leaving the transaction open would hold locks until the server expires
+        # it, and the partial graph would outlive the failure.
+        #
+        # The rollback's own failure must never replace the original error. When
+        # a proxy drops the connection mid-sync, the server usually discards the
+        # transaction with it, so this rollback answers "Remote transaction not
+        # found or expired" (HTTP 404) — and an unguarded `client.rollback()`
+        # raised that *instead of* the 502 that actually happened. The caller
+        # then saw a 404, which is not retryable, and abandoned a sync that
+        # should have been restarted. The cause outranks the cleanup.
+        try:
+            client.rollback()
+        except Exception as cleanup:  # noqa: BLE001 - the original error wins
+            logger.debug("Rollback after a failed sync also failed: %s", cleanup)
         raise
 
 

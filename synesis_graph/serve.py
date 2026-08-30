@@ -259,13 +259,12 @@ def start_server(options: ServeOptions) -> ServeHandle | PipelineError:
     try:
         import arcadedb_embedded
     except ImportError:
+        from synesis_graph.arcadedb_embedded_client import missing_embedded_engine_advice
+
         return DependencyError(
             message="The local graph engine is not available",
             stage="dependency",
-            details=(
-                "The 'arcadedb-embedded' package ships with synesis-graph. "
-                "Reinstall with: pip install --force-reinstall synesis-graph"
-            ),
+            details=missing_embedded_engine_advice(),
         )
 
     root = options.db_path.resolve()

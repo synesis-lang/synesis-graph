@@ -41,7 +41,13 @@ class DummyReporter:
 
         class _Step:
             def __enter__(self):
-                return reporter
+                return self
+
+            def fail(self, detail: str = "") -> None:
+                # Mirrors the real `_StepContext`: callers that report failure by
+                # returning an error must be able to say so, or the step would
+                # claim success. A double without this hides that bug.
+                reporter.messages.append(("step_failed", detail))
 
             def __exit__(self, *exc):
                 return False
@@ -82,13 +88,17 @@ class FakeClient:
             self.existing.append(name)
         self.created.append(name)
 
-    def command(self, statement, params=None, *, language="cypher", database=None):
+    def command(
+        self, statement, params=None, *, language="cypher", database=None, limit=None
+    ):
         if self.fail_on and self.fail_on in statement:
             raise ArcadeDBError(f"forced failure: {self.fail_on}")
         self.statements.append(statement)
         return []
 
-    def query(self, statement, params=None, *, language="cypher", database=None):
+    def query(
+        self, statement, params=None, *, language="cypher", database=None, limit=None
+    ):
         self.statements.append(statement)
         return []
 
@@ -246,7 +256,9 @@ def test_clear_without_connection_is_an_error(adapter, minimal_payload):
 # ---------------------------------------------------------------------------
 def test_synchronize_writes_the_payload(connected, minimal_payload):
     assert connected.synchronize_payload(minimal_payload, DummyReporter()) is None
-    assert any("MERGE (s:Source" in s for s in connected.client.statements)
+    # CREATE, not MERGE: the adapter clears before syncing, so it runs in
+    # rebuild mode. See test_sync_mode.py.
+    assert any("CREATE (s:Source" in s for s in connected.client.statements)
 
 
 def test_synchronize_passes_the_configured_analyzer(config, minimal_payload):
@@ -261,7 +273,7 @@ def test_synchronize_passes_the_configured_analyzer(config, minimal_payload):
 
 
 def test_synchronize_reports_failure_as_sync_error(connected, minimal_payload):
-    connected.client.fail_on = "MERGE (s:Source"
+    connected.client.fail_on = "(s:Source {bibtex"
     error = connected.synchronize_payload(minimal_payload, DummyReporter())
     assert isinstance(error, SyncError)
 

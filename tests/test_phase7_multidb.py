@@ -144,7 +144,15 @@ def test_neo4j_adapter_smoke_executes_and_closes_resources(s2g, monkeypatch):
         "ensure_database_exists",
         lambda driver, db_name, reporter, default_database="neo4j": (db_name, None),
     )
-    monkeypatch.setattr(_base, "sync_to_neo4j", lambda session, payload, analyzer=None: None)
+    monkeypatch.setattr(
+        _base,
+        "sync_to_neo4j",
+        # `mode` is accepted, not ignored: the adapter must keep passing the
+        # default when nobody asked for an incremental run.
+        lambda session, payload, analyzer=None, mode="rebuild": (
+            None if mode == "rebuild" else _unexpected_mode(mode)
+        ),
+    )
     monkeypatch.setattr(_base, "compute_metrics", lambda session, payload, reporter: None)
 
     adapter = s2g.Neo4jBackendAdapter(
@@ -154,6 +162,12 @@ def test_neo4j_adapter_smoke_executes_and_closes_resources(s2g, monkeypatch):
     assert err is None
     assert fake_driver.session_obj.closed is True
     assert fake_driver.closed is True
+
+
+
+def _unexpected_mode(mode: str):
+    """Fails loudly if the adapter forwards a mode nobody asked for."""
+    raise AssertionError(f"unexpected sync mode {mode!r}")
 
 
 def _fake_neo4j(monkeypatch, s2g, captured):
@@ -190,7 +204,15 @@ def _fake_neo4j(monkeypatch, s2g, captured):
         "ensure_database_exists",
         lambda driver, db_name, reporter, default_database="neo4j": (db_name, None),
     )
-    monkeypatch.setattr(_base, "sync_to_neo4j", lambda session, payload, analyzer=None: None)
+    monkeypatch.setattr(
+        _base,
+        "sync_to_neo4j",
+        # `mode` is accepted, not ignored: the adapter must keep passing the
+        # default when nobody asked for an incremental run.
+        lambda session, payload, analyzer=None, mode="rebuild": (
+            None if mode == "rebuild" else _unexpected_mode(mode)
+        ),
+    )
     monkeypatch.setattr(_base, "compute_metrics", lambda session, payload, reporter: None)
 
 

@@ -34,13 +34,17 @@ class FakeClient:
         self._query_results = query_results or {}
         self.fail_on: str | None = None
 
-    def command(self, statement, params=None, *, language="cypher", database=None):
+    def command(
+        self, statement, params=None, *, language="cypher", database=None, limit=None
+    ):
         if self.fail_on and self.fail_on in statement:
             raise ArcadeDBError(f"forced failure on {self.fail_on}")
         self.statements.append((language, statement, params))
         return []
 
-    def query(self, statement, params=None, *, language="cypher", database=None):
+    def query(
+        self, statement, params=None, *, language="cypher", database=None, limit=None
+    ):
         self.statements.append((language, statement, params))
         for needle, rows in self._query_results.items():
             if needle in statement:
@@ -292,27 +296,35 @@ class TestSyncToArcadeDB:
     def test_schema_is_created_before_the_transaction(self, client, minimal_payload):
         """DDL inside the write transaction would be a different failure mode."""
         sync_to_arcadedb(client, minimal_payload)
-        first_merge = next(i for i, (_, s, _) in enumerate(client.statements) if "MERGE" in s)
+        # The first row write, whichever clause it uses: sources are written
+        # with CREATE in rebuild mode and MERGE in update, so keying on either
+        # word alone would stop finding the real first write.
+        first_write = next(
+            i for i, (_, s, _) in enumerate(client.statements) if "UNWIND $rows" in s
+        )
         schema_positions = [
             i for i, (_, s, _) in enumerate(client.statements) if "CREATE PROPERTY" in s
         ]
-        assert schema_positions and max(schema_positions) < first_merge
+        assert schema_positions and max(schema_positions) < first_write
 
     def test_reuses_the_neo4j_cypher_for_writing(self, client, minimal_payload):
+        """CREATE, not MERGE: `sync_to_arcadedb` clears first, so it syncs in
+        rebuild mode, where the payload's own uniqueness makes the per-row index
+        lookup pure cost. See test_sync_mode.py."""
         sync_to_arcadedb(client, minimal_payload)
         cypher = " ".join(client.cypher())
-        assert "MERGE (s:Source {bibtex: row.bibtex})" in cypher
-        assert "MERGE (i:Item {item_id: row.item_id})" in cypher
+        assert "CREATE (s:Source {bibtex: row.bibtex})" in cypher
+        assert "CREATE (i:Item {item_id: row.item_id})" in cypher
         assert "RELATES_TO" in cypher
 
     def test_failure_returns_a_sync_error(self, client, minimal_payload):
-        client.fail_on = "MERGE (s:Source"
+        client.fail_on = "(s:Source {bibtex"
         result = sync_to_arcadedb(client, minimal_payload)
         assert isinstance(result, SyncError)
         assert result.stage == "sync"
 
     def test_failure_rolls_the_transaction_back(self, client, minimal_payload):
-        client.fail_on = "MERGE (s:Source"
+        client.fail_on = "(s:Source {bibtex"
         sync_to_arcadedb(client, minimal_payload)
         assert client.transactions == ["begin", "rollback"]
 

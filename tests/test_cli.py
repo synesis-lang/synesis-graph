@@ -11,6 +11,7 @@ import subprocess
 import sys
 from importlib.metadata import version
 
+import pytest
 from click.testing import CliRunner
 
 from synesis_graph.cli import main
@@ -165,7 +166,13 @@ def test_serve_help_documents_the_read_only_default():
 
 
 def test_serve_reports_an_empty_root_instead_of_serving_nothing(tmp_path):
-    """Starting over no database is the silent failure this guards against."""
+    """Starting over no database is the silent failure this guards against.
+
+    Needs the engine: without it `serve` stops one step earlier, on the missing
+    dependency, which is a different (and correct) message. That is the ordinary
+    situation on an Intel Mac, where no build of the engine exists.
+    """
+    pytest.importorskip("arcadedb_embedded", reason="the local engine is absent")
     result = _run("serve", "--db-path", str(tmp_path))
     assert result.exit_code != 0
     assert "No database found" in result.output
