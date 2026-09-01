@@ -408,7 +408,7 @@ pip install -e .
 | synesis | 0.11.0 | — | ≥3.10 |
 | synesis-coder | 0.8.0 | ≥0.10.0 | ≥3.10 |
 | synesis-lsp | 0.22.0 | ≥0.10.0 | ≥3.10 |
-| synesis-graph | 0.10.0 | ≥0.10.0 | ≥3.10 |
+| synesis-graph | 0.12.0 | ≥0.10.0 | ≥3.10 |
 
 ### GDS Plugin (Optional)
 

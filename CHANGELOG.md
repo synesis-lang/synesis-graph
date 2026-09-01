@@ -13,6 +13,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-01
+
+### Fixed — a large upload is no longer written as one giant transaction
+
+A full load of the real corpus failed against a remote server with
+`Remote transaction not found or expired`, three attempts in a row. The server
+was not the problem in the way it appeared: measured batch by batch, statements
+1-47 succeeded and the 48th — roughly 240,000 uncommitted rows, about two
+minutes in — was refused, while the container stayed up, never restarted and
+well inside its memory limit. Per-batch times climbed with the backlog (1.2s
+early, 4.4s late, 11.9s on the one that failed). The server had not died; it had
+discarded a transaction that grew too large to keep holding.
+
+Corpus growth was not the cause either, though it was the trigger: the export
+had grown 1.3% (246,588 to 249,735 items), and the cut fell on the 48th of 50
+batches. The margin had already been gone.
+
+Writes now commit in segments rather than in one transaction spanning the whole
+corpus. Each segment is small and quick, and none accumulates enough to be
+thrown away. The same load that failed three times now completes in 14 minutes.
+
+### Added — a graph records whether its load ever finished
+
+Committing in segments trades one guarantee for another, and the trade is worth
+stating plainly. A single transaction meant a failed load left nothing behind.
+Segments mean a failed load leaves the segments that already committed — a
+partial graph whose vertices are real, whose counts merely look low, and which
+otherwise says nothing about being incomplete. For a researcher querying it,
+that is the worst kind of wrong: quietly missing data.
+
+So `ProjectContext` now carries a `load_state`. It is raised before the first
+write and lowered only after the last one, embeddings included. A graph marked
+`in_progress` that nobody is currently loading means exactly one thing: that
+load died, and the graph holds only part of its corpus.
+
+Two guards read it:
+
+- **A second load refuses to start while one is running.** Two writers on one
+  graph interleave their writes and neither result can be trusted. The refusal
+  names the machine and process holding it, so the researcher knows whether it
+  is their own other window or a colleague's.
+- **`--mode update` refuses a half-written graph.** Merging into a partial
+  corpus would fold the gap into the result and stop it being visible. A
+  rebuild clears first, so it is the way out.
+
+The flag carries a heartbeat, refreshed as each segment commits, because a
+process that dies cannot lower its own flag. Without an expiry, one crash would
+lock the graph until someone repaired it by hand. A flag whose heartbeat has
+gone quiet is treated as abandoned and cleared by the next rebuild.
+
+### Fixed — a slow moment no longer ends a large upload
+
+An upload that hit a slow patch reported `Remote transaction not found or
+expired` and gave up, with the timeouts that actually caused it nowhere in the
+message. Two separate problems, both fixed:
+
+- **An expired transaction is transient.** The server discards a session when
+  the client goes quiet, which is precisely what a slow moment produces — but a
+  404 is normally permanent (a missing database stays missing), so this one
+  broke the retry loop instead of feeding it. It is now recognised by its
+  message and retried; an ordinary 404 still fails immediately.
+- **The reported error is the first cause, not the last symptom.** A run that
+  fails repeatedly ends on its own fallout: a write times out, the server drops
+  the session, and the cleanup reports the missing transaction. Reporting that
+  last error sent the reader chasing a phantom. The failure that *started* the
+  run is what is reported now.
+
+### Changed — generating embeddings no longer floods the terminal
+
+Downloading the model printed more than twenty lines of HTTP requests and
+redirects, plus a duplicated warning about anonymous Hugging Face access and a
+`BertModel LOAD REPORT` table flagging a harmless key as UNEXPECTED. For a
+qualitative researcher that reads as a wall of errors around a step that is
+working.
+
+Those are progress notes for a download, not diagnostics, so they are silenced
+along with the Neo4j driver's own chatter — and `-v` brings all of them back.
+
+
 ## [0.11.0] - 2026-08-29
 
 ### Changed — a full rebuild writes with `CREATE` instead of `MERGE`
@@ -95,10 +174,15 @@ rely on the rest of it either.
 
 Against a stock server behind a reverse proxy, a large upload could fail with
 `Bad Gateway (HTTP 502)` after minutes of work, leaving nothing behind. The
-database was healthy throughout — answering its readiness probe in 74ms while
-returning 502s — so the proxy in front of it was cutting connections under load.
-The same statement succeeded repeatedly minutes later, which is what makes this
-a transient failure rather than a limit worth tuning around.
+same statement succeeded repeatedly minutes later, which is what makes this a
+transient failure rather than a limit worth tuning around.
+
+One such failure was later traced to the server itself rather than the network:
+a container without a memory limit was being killed by the host kernel, and the
+proxy returned 502 because there was nothing behind it. Retrying does not fix a
+server that dies mid-upload — but it is what turned an opaque failure into a
+legible one, which is how that cause was found. If uploads keep failing after
+these retries, look at the server's own memory limits before the client.
 
 - **Connection failures are retried immediately.** When the connection never
   opened, the database cannot have seen the statement, so repeating it is safe.

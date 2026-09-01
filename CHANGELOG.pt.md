@@ -13,6 +13,87 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ## [Não lançado]
 
+## [0.12.0] - 2026-09-01
+
+### Corrigido — uma carga grande não é mais escrita numa transação única
+
+A carga completa do corpus real falhava contra um servidor remoto com
+`Remote transaction not found or expired`, três tentativas seguidas. O servidor
+não era o problema do jeito que parecia: medindo lote a lote, as instruções 1-47
+passavam e a 48ª — cerca de 240.000 linhas ainda não commitadas, uns dois
+minutos de execução — era recusada, enquanto o container seguia de pé, sem
+reiniciar e bem dentro do seu limite de memória. Os tempos por lote subiam com o
+acúmulo (1,2s no início, 4,4s perto do fim, 11,9s no que falhou). O servidor não
+tinha morrido; tinha descartado uma transação grande demais para continuar
+segurando.
+
+O crescimento do corpus também não era a causa, embora fosse o gatilho: a
+exportação crescera 1,3% (de 246.588 para 249.735 itens), e o corte caía na 48ª
+de 50 requisições. A margem já não existia.
+
+As escritas agora commitam em segmentos, em vez de uma transação que atravessa o
+corpus inteiro. Cada segmento é pequeno e rápido, e nenhum acumula o bastante
+para ser descartado. A mesma carga que falhou três vezes agora conclui em 14
+minutos.
+
+### Adicionado — o grafo registra se sua carga chegou ao fim
+
+Commitar em segmentos troca uma garantia por outra, e a troca merece ser dita
+com todas as letras. Transação única significava que uma carga falha não deixava
+nada. Segmentos significam que ela deixa os segmentos já commitados — um grafo
+parcial cujos vértices são reais, cujas contagens apenas parecem baixas, e que
+nada mais denuncia como incompleto. Para quem consulta, esse é o pior tipo de
+erro: dado faltando em silêncio.
+
+Por isso o `ProjectContext` passa a carregar um `load_state`. Ele é levantado
+antes da primeira escrita e baixado só depois da última, embeddings incluídos.
+Um grafo marcado `in_progress` que ninguém está carregando significa exatamente
+uma coisa: aquela carga morreu, e o grafo tem só parte do corpus.
+
+Duas guardas o leem:
+
+- **Uma segunda carga recusa começar enquanto outra roda.** Dois escritores no
+  mesmo grafo intercalam suas escritas e nenhum resultado é confiável. A recusa
+  nomeia a máquina e o processo que o segura, para o pesquisador saber se é a
+  própria janela ao lado ou a de um colega.
+- **`--mode update` recusa um grafo meio escrito.** Atualizar por cima de um
+  corpus parcial dobraria a lacuna dentro do resultado e ela deixaria de ser
+  visível. O rebuild limpa antes, então é a saída.
+
+A flag carrega um heartbeat, renovado a cada commit de segmento, porque um
+processo que morre não consegue baixar a própria flag. Sem expiração, uma queda
+travaria o grafo até alguém consertar à mão. Uma flag cujo heartbeat silenciou é
+tratada como abandonada e limpa pelo próximo rebuild.
+
+### Corrigido — um momento de lentidão não encerra mais uma carga grande
+
+Uma carga que pegava o servidor lento reportava `Remote transaction not found or
+expired` e desistia, com os timeouts que de fato a causaram ausentes da
+mensagem. Dois problemas distintos, ambos corrigidos:
+
+- **Transação expirada é falha transitória.** O servidor descarta a sessão
+  quando o cliente fica em silêncio, que é exatamente o que a lentidão produz —
+  mas um 404 normalmente é permanente (um banco inexistente continua
+  inexistente), então esse quebrava o laço de retentativa em vez de alimentá-lo.
+  Agora é reconhecido pela mensagem e repetido; um 404 comum continua falhando
+  na hora.
+- **O erro reportado é a primeira causa, não o último sintoma.** Uma execução
+  que falha repetidamente termina no próprio rastro: a escrita expira, o
+  servidor derruba a sessão, e a limpeza reporta a transação ausente. Reportar
+  esse último erro mandava o leitor atrás de um fantasma. Agora se reporta a
+  falha que **iniciou** a execução.
+
+### Alterado — gerar embeddings não inunda mais o terminal
+
+Baixar o modelo imprimia mais de vinte linhas de requisições HTTP e
+redirecionamentos, além de um aviso duplicado sobre acesso anônimo ao Hugging
+Face e uma tabela `BertModel LOAD REPORT` marcando uma chave inofensiva como
+UNEXPECTED. Para um pesquisador qualitativo, isso se lê como uma parede de erros
+em torno de um passo que está funcionando.
+
+São notas de progresso de um download, não diagnóstico, então foram silenciadas
+junto com a tagarelice do driver do Neo4j — e `-v` traz todas de volta.
+
 ## [0.11.0] - 2026-08-29
 
 ### Changed — o rebuild grava com `CREATE` em vez de `MERGE`
@@ -92,11 +173,16 @@ pode significar erro não consegue confiar no resto.
 ### Fixed — uma conexão derrubada não joga mais fora uma exportação inteira
 
 Contra um servidor padrão atrás de proxy reverso, uma carga grande podia falhar
-com `Bad Gateway (HTTP 502)` depois de minutos de trabalho, sem deixar nada. O
-banco estava saudável o tempo todo — respondendo em 74 ms enquanto devolvia
-502 —, então era o proxy à frente dele cortando conexões sob carga. A mesma
-instrução passava repetidamente minutos depois, e é isso que caracteriza falha
-transitória em vez de um limite a ser contornado.
+com `Bad Gateway (HTTP 502)` depois de minutos de trabalho, sem deixar nada. A
+mesma instrução passava repetidamente minutos depois, e é isso que caracteriza
+falha transitória em vez de um limite a ser contornado.
+
+Uma dessas falhas foi depois rastreada até o próprio servidor, não a rede: um
+container sem limite de memória estava sendo morto pelo kernel do host, e o
+proxy devolvia 502 porque não havia ninguém atrás. Repetir não conserta um
+servidor que morre no meio da carga — mas foi o que transformou uma falha opaca
+em legível, e assim a causa apareceu. Se as cargas continuarem falhando depois
+destas retentativas, olhe os limites de memória do servidor antes do cliente.
 
 - **Falhas de conexão são repetidas na hora.** Quando a conexão nunca abriu, o
   banco não pode ter visto a instrução, então repetir é seguro. O servidor real

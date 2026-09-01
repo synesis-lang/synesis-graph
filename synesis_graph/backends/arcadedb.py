@@ -117,13 +117,74 @@ class _CypherRunner:
     against a Neo4j transaction object and only ever call `.run()`. Rather than
     forking them for a second client, the client is dressed in the shape they
     expect.
+
+    **It also decides when to commit.** A single transaction spanning the whole
+    corpus is what the server refuses: measured against the real Quinto Andar
+    export, batches 1-47 succeeded and the 48th — roughly 240,000 uncommitted
+    rows, about two minutes in — came back `Remote transaction not found or
+    expired` while the container itself stayed up, unrestarted and well inside
+    its memory limit. The server had not died; it had discarded a transaction
+    that grew too large to keep holding. Per-batch times climbed with the
+    backlog (1.2s early, 4.4s late, 11.9s on the one that failed), which is the
+    same story from the client side.
+
+    So the writes are committed in segments: every `commit_every` statements the
+    runner commits and opens a fresh transaction. Each segment is small and
+    quick, and no transaction ever accumulates enough to be thrown away.
+
+    Segmenting trades one guarantee for another, and the trade has to be stated.
+    A single transaction meant a failed sync left nothing behind. Segments mean
+    a failure leaves the segments that already committed — a half-written graph.
+    That is why `load_state` exists: the flag is raised before the first write
+    and lowered only after the last, so a graph interrupted midway is *known* to
+    be incomplete rather than silently passing for whole. A retry starts with
+    `clear_database`, so the leftovers are removed, not merged into.
     """
 
-    def __init__(self, client: ArcadeDBTransport):
+    def __init__(
+        self,
+        client: ArcadeDBTransport,
+        commit_every: int = 0,
+        heartbeat: bool = False,
+    ):
         self._client = client
+        self._commit_every = commit_every
+        # Off unless the caller has a `ProjectContext` to write it to.
+        self._heartbeat = heartbeat
+        self._since_commit = 0
 
     def run(self, query: str, **params: Any) -> list[dict[str, Any]]:
-        return self._client.command(query, params or None)
+        result = self._client.command(query, params or None)
+        self._maybe_commit()
+        return result
+
+    def _maybe_commit(self) -> None:
+        """Commits and reopens once enough statements have accumulated.
+
+        Called after the statement, never before: committing first would leave
+        the statement outside any transaction if the reopen failed.
+        """
+        if self._commit_every <= 0:
+            return
+        self._since_commit += 1
+        if self._since_commit < self._commit_every:
+            return
+        self._since_commit = 0
+        # Refreshed with each segment, inside the transaction that is about to
+        # commit. This is what keeps a live loader's flag from ageing into
+        # "abandoned" while it is still working, and it costs one statement per
+        # segment. Best-effort: on a graph with no context vertex it matches
+        # nothing, which is the correct outcome, not an error.
+        if self._heartbeat:
+            try:
+                self._client.command(
+                    f"MATCH (p:ProjectContext) SET p.{LOAD_HEARTBEAT_PROP} = $beat",
+                    {"beat": time.time()},
+                )
+            except Exception as exc:  # noqa: BLE001 - must not fail a load
+                logger.debug("Could not refresh the load heartbeat: %s", exc)
+        self._client.commit()
+        self._client.begin()
 
 
 #: Context properties that describe how the graph's INDEXES were built, paired
@@ -162,6 +223,86 @@ def read_project_context(client: ArcadeDBTransport) -> dict[str, Any] | None:
     row = rows[0]
     stored = row.get("p", row)
     return stored if isinstance(stored, dict) else None
+
+
+def _load_owner_id() -> str:
+    """Identifies this loader well enough for a human to act on it.
+
+    Host and process: enough for the researcher who finds a live flag to know
+    whether it is their own other window or a colleague's machine, which is the
+    decision the message has to support.
+    """
+    import os
+    import socket
+
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def describe_running_load(stored: dict[str, Any] | None) -> str | None:
+    """Describes a load that appears to be running right now, or None.
+
+    None means "no live owner": either no flag, a finished load, or a flag whose
+    heartbeat went stale — the abandoned case, which a new load may clear.
+
+    The staleness test is what keeps a crashed loader from locking the graph
+    forever. A process that dies cannot lower its own flag, so a flag alone would
+    be a permanent block requiring manual repair; the heartbeat gives it an
+    expiry that a *living* loader keeps pushing forward.
+    """
+    if not load_is_incomplete(stored):
+        return None
+    assert stored is not None
+    beat: object = stored.get(LOAD_HEARTBEAT_PROP)
+    try:
+        age = time.time() - float(beat)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        # A flag with no readable heartbeat predates this or was written by a
+        # loader that never got to record one. Treated as abandoned: it cannot
+        # be shown to be alive, and a stuck flag no one can clear is worse than
+        # a rare overlap.
+        return None
+    if age > LOAD_STALE_AFTER_SECONDS:
+        return None
+    owner = str(stored.get(LOAD_OWNER_PROP) or "unknown")
+    return f"{owner}, last seen {int(age)}s ago"
+
+
+def _set_load_state(client: ArcadeDBTransport, state: str) -> None:
+    """Records on `ProjectContext` whether a load is running or finished.
+
+    Written outside the segmented transactions on purpose. Raising the flag
+    inside the first segment would be pointless — a crash before that segment
+    committed would leave no flag at all, which is the case the flag exists to
+    catch — and lowering it inside the last one would tie "the load finished" to
+    a transaction that can still be discarded.
+
+    Silent when there is no context vertex: a hand-built payload carries no
+    project to describe, and `_sync_project_context` writes nothing for it.
+    Failing here would break a sync over bookkeeping.
+    """
+    try:
+        client.command(
+            f"MATCH (p:ProjectContext) SET p.{LOAD_STATE_PROP} = $state",
+            {"state": state},
+        )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a sync
+        logger.debug("Could not record load state %r: %s", state, exc)
+
+
+def load_is_incomplete(stored: dict[str, Any] | None) -> bool:
+    """True when the stored context says a previous load never finished.
+
+    Reads the answer off the graph, like `incompatible_with_update`: the graph is
+    the only thing that knows what it actually contains, and the load that died
+    may well have been run from another machine.
+
+    A missing flag is not "incomplete". Graphs written before this existed carry
+    no such property, and treating them as broken would condemn every older
+    database on no evidence.
+    """
+    if not stored:
+        return False
+    return str(stored.get(LOAD_STATE_PROP) or "") == LOAD_IN_PROGRESS
 
 
 def incompatible_with_update(
@@ -301,6 +442,51 @@ def _retry_is_safe(mode: SyncMode) -> bool:
 #: once the retry made the failure legible instead of fatal.
 SYNC_BATCH_SIZE = 5_000
 
+#: How many statements a segmented write may accumulate before committing.
+#:
+#: A whole-corpus transaction is what the server rejects (see `_CypherRunner`),
+#: so the writes commit in segments. This is the segment size, in statements —
+#: with `SYNC_BATCH_SIZE` at 5,000 rows, ten statements is about 50,000 rows and
+#: roughly 30 seconds against the remote server, well under the point where the
+#: transaction was being discarded, and few enough commits that their own cost
+#: stays marginal.
+SYNC_COMMIT_EVERY = 10
+
+#: Property on `ProjectContext` recording whether a load ran to completion.
+#:
+#: Segmented commits mean an interrupted sync leaves committed segments behind.
+#: Without a marker those leftovers are indistinguishable from a finished graph:
+#: the vertices are there, the counts merely look low, and nothing says the load
+#: stopped halfway. A researcher querying it would get answers that are wrong in
+#: the one way that is hard to notice — quietly incomplete.
+#:
+#: So the flag is raised before the first write and lowered only after the last
+#: one, embeddings included. `in_progress` on a graph nobody is currently
+#: loading means exactly one thing: that load died, and the graph is partial.
+LOAD_STATE_PROP = "load_state"
+LOAD_IN_PROGRESS = "in_progress"
+LOAD_COMPLETE = "complete"
+
+#: Who raised the flag, and when. Written beside it, because `in_progress` alone
+#: cannot answer the question that matters when a *new* load finds it set.
+#:
+#: Two very different situations look identical through the flag: another loader
+#: is running right now, or a loader died and left the flag standing. The right
+#: response is opposite in each — abort, because two writers on one graph corrupt
+#: each other, versus proceed, because clearing the wreckage is exactly what a
+#: retry is for. Recording the owner and the heartbeat is what tells them apart.
+LOAD_OWNER_PROP = "load_owner"
+LOAD_HEARTBEAT_PROP = "load_heartbeat"
+
+#: How long a flag may stand without its owner refreshing the heartbeat before a
+#: new load treats it as abandoned rather than live.
+#:
+#: Generous on purpose. The cost of waiting too long is a clear message telling
+#: the researcher to retry; the cost of being too eager is two loaders writing the
+#: same graph. Segments commit about every 30s against the remote server, and the
+#: heartbeat rides with them, so a live loader refreshes far inside this window.
+LOAD_STALE_AFTER_SECONDS = 900
+
 #: Vertex collections a bulk load may write, in the order the sync writes them.
 #: Each is a payload attribute whose rows carry a key the compiler guarantees to
 #: be unique — measured on the real corpus at 0 duplicates across 272,154 rows
@@ -428,21 +614,44 @@ def sync_to_arcadedb(
         # update rewrites the context vertex, so it must carry the declaration
         # even though it did not rebuild the index it describes.
         _declare_fulltext(payload, fulltext_analyzer)
-        # Before the transaction, never inside it — see `_bulk_load_vertices`.
+        # Raised before the first write and lowered only after the last, so a
+        # sync that dies midway leaves the graph marked incomplete instead of
+        # passing for whole. This matters because the writes commit in segments
+        # (see `_CypherRunner`): the leftovers of a failed run are real, queryable
+        # vertices, and nothing else would say they are only part of the corpus.
+        #
+        # After `_sync_project_context` has run, necessarily: the flag lives on
+        # the context vertex, and in rebuild that vertex does not exist until the
+        # transaction writes it. So the first segment carries the context, and the
+        # flag is set on it as soon as that segment can be reached — which is why
+        # this sits between the bulk load and the transaction, not before both.
         bulk_loaded = _bulk_load_vertices(client, payload, mode)
         _execute_sync_transaction(client, payload, mode, skip=bulk_loaded)
         if embeddings is not None:
             error = _sync_embeddings(client, payload, embeddings)
             if error is not None:
+                # Left `in_progress` deliberately: the vectors are part of the
+                # load, and a graph missing them is incomplete even though every
+                # vertex is present.
                 return error
+        if payload.project_context is not None:
+            _set_load_state(client, LOAD_COMPLETE)
         return None
 
     last: Exception | None = None
+    first_cause: ArcadeDBError | None = None
     for tries_left in range(SYNC_RETRY_ATTEMPTS - 1, -1, -1):
         try:
             return attempt()
         except ArcadeDBError as e:
             last = e
+            # Remember what went wrong FIRST. A run that fails repeatedly ends
+            # on whatever surfaced last, and that is often a consequence rather
+            # than the cause: a write times out, the server drops the session,
+            # and the next attempt reports "transaction not found". Reporting
+            # the last error sent the reader after a phantom.
+            if first_cause is None:
+                first_cause = e
             if not (e.retryable and _retry_is_safe(mode) and tries_left):
                 break
             # Restarting the whole sync, not the lost request. A gateway failure
@@ -465,7 +674,9 @@ def sync_to_arcadedb(
         except Exception as e:  # noqa: BLE001 - surfaced to the caller as typed
             last = e
             break
-    if isinstance(last, ArcadeDBError) and last.retryable:
+    # The first failure explains the run; the last one is usually its fallout.
+    reported = first_cause if first_cause is not None else last
+    if isinstance(reported, ArcadeDBError) and reported.retryable:
         # A transient failure that outlived every retry is a different problem
         # from a rejected statement, and the way out is different too. Saying so
         # here saves the researcher from re-reading a stack of gateway errors
@@ -474,13 +685,13 @@ def sync_to_arcadedb(
             message="The server kept dropping the connection",
             stage="sync",
             details=(
-                f"{last} — this is the server or its proxy, not your project. "
+                f"{reported} — this is the server or its proxy, not your project. "
                 "Nothing was left half-written. Try again when the server is "
                 "less busy; if it keeps happening, the server may need more "
                 "memory, or a longer timeout via [arcadedb].timeout."
             ),
         )
-    return SyncError(message="Synchronization failed", stage="sync", details=str(last))
+    return SyncError(message="Synchronization failed", stage="sync", details=str(reported))
 
 
 # ---------------------------------------------------------------------------
@@ -909,12 +1120,31 @@ def _execute_sync_transaction(
     # own `MERGE` pass to create concepts that the ontology never declared.
     concepts = [] if "concepts" in skip else payload.concepts
 
-    tx = _CypherRunner(client)
+    tx = _CypherRunner(
+        client,
+        commit_every=SYNC_COMMIT_EVERY,
+        heartbeat=payload.project_context is not None,
+    )
     client.begin()
     try:
         # Same position as in `sync_to_neo4j`: first, and inside the transaction,
         # so the context never outlives a sync that failed halfway.
         _sync_project_context(tx, payload.project_context, mode)
+        # Inside the first segment, straight after the vertex it writes to: the
+        # property has nowhere to live until the context exists. Committed with
+        # that segment, so by the time any bulk of data is written the graph
+        # already carries the mark saying the load is under way.
+        # Only when there is a context vertex to carry it. A hand-built payload
+        # has none, and `MATCH` on a type that was never created is not a no-op
+        # everywhere — it is a statement about a graph this sync does not own.
+        if payload.project_context is not None:
+            tx.run(
+                f"MATCH (p:ProjectContext) SET p.{LOAD_STATE_PROP} = $state, "
+                f"p.{LOAD_OWNER_PROP} = $owner, p.{LOAD_HEARTBEAT_PROP} = $beat",
+                state=LOAD_IN_PROGRESS,
+                owner=_load_owner_id(),
+                beat=time.time(),
+            )
         _sync_sources(tx, sources, batch_size=bs, mode=mode)
         _sync_items(tx, items, batch_size=bs, mode=mode)
         _sync_from_source(tx, payload.from_source, batch_size=bs)
@@ -931,6 +1161,9 @@ def _execute_sync_transaction(
         _sync_mentions(tx, payload.mentions, payload.concept_label, batch_size=bs)
         _sync_entities(tx, payload.entities, batch_size=bs)
         _sync_refers_to(tx, payload.refers_to_edges, batch_size=bs)
+        # Commits whatever the last segment left open. The runner always leaves a
+        # transaction open — it reopens immediately after each segment — so this
+        # is never a no-op, even when the final segment was empty.
         client.commit()
     except Exception:
         # Leaving the transaction open would hold locks until the server expires

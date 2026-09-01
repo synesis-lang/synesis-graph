@@ -21,6 +21,7 @@ otherwise restart the whole sync, which a rebuild's initial clear makes safe.
 
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import pytest
@@ -413,3 +414,109 @@ def test_every_batched_sync_call_gets_the_smaller_size():
         call = src[src.index(f"{fn}(") :]
         call = call[: call.index("\n        _") if "\n        _" in call else len(call)]
         assert "batch_size=bs" in call, f"{fn} still uses the shared default"
+
+
+# ---------------------------------------------------------------------------
+# The expired session, and what it was hiding
+# ---------------------------------------------------------------------------
+
+
+def test_an_expired_transaction_is_transient(monkeypatch):
+    """The server drops a session when the client goes quiet under load.
+
+    That is a consequence of slowness, not a permanent condition, so it must not
+    end the retry. Left unclassified it did exactly that: a real 249,735-item
+    export showed two retry warnings and then `Remote transaction ... not found
+    or expired`, having abandoned a run that timeouts had caused.
+    """
+    import urllib.error
+    import urllib.request
+
+    from synesis_graph.arcadedb_client import ArcadeDBClient, ArcadeDBError
+
+    def _raise(*a, **k):
+        raise urllib.error.HTTPError(
+            "http://x", 404, "Not Found", {},
+            io.BytesIO(b'{"error":"Remote transaction not found or expired"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", _raise)
+    client = ArcadeDBClient(uri="http://x", user="u", password="p", database="d")
+
+    with pytest.raises(ArcadeDBError) as excinfo:
+        client.command("MATCH (n) RETURN n")
+
+    assert excinfo.value.retryable is True
+    assert excinfo.value.applied_unknown is True
+
+
+def test_an_ordinary_404_still_fails_fast(monkeypatch):
+    """A missing database will stay missing; retrying only delays the answer."""
+    import urllib.error
+    import urllib.request
+
+    from synesis_graph.arcadedb_client import ArcadeDBClient, ArcadeDBError
+
+    def _raise(*a, **k):
+        raise urllib.error.HTTPError(
+            "http://x", 404, "Not Found", {},
+            io.BytesIO(b'{"error":"Database \'nope\' does not exist"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", _raise)
+    client = ArcadeDBClient(uri="http://x", user="u", password="p", database="d")
+
+    with pytest.raises(ArcadeDBError) as excinfo:
+        client.command("MATCH (n) RETURN n")
+
+    assert excinfo.value.retryable is False
+
+
+def test_the_reported_error_is_the_first_cause_not_the_last_symptom(monkeypatch):
+    """A failing run ends on its fallout; the reader needs what started it.
+
+    Here every attempt times out on the write, and each cleanup reports an
+    expired session. Reporting the last error sent the reader chasing a phantom
+    transaction instead of the slowness that actually broke the run.
+    """
+    from synesis_graph.backends import arcadedb as mod
+    from tests.conftest import _make_payload
+
+    class _SlowThenGone:
+        def command(self, statement, params=None, **kw):
+            from synesis_graph.arcadedb_client import ArcadeDBError as _Current
+
+            if "UNWIND" in statement:
+                raise _Current(
+                    "ArcadeDB did not answer within 300s",
+                    retryable=True,
+                    applied_unknown=True,
+                )
+            return []
+
+        def query(self, statement, params=None, **kw):
+            return []
+
+        def begin(self, database=None):
+            return "AS-1"
+
+        def commit(self, database=None):
+            pass
+
+        def rollback(self, database=None):
+            from synesis_graph.arcadedb_client import ArcadeDBError as _Current
+
+            raise _Current("Remote transaction not found or expired", status=404)
+
+    for name in ("_create_schema", "_create_constraints", "_create_search_indexes"):
+        monkeypatch.setattr(mod, name, lambda *a, **k: None)
+    monkeypatch.setattr(mod, "clear_database", lambda c: None)
+    monkeypatch.setattr(mod, "_bulk_load_vertices", lambda *a, **k: frozenset())
+    monkeypatch.setattr(mod, "_RETRY_BACKOFF_SECONDS", 0.0)
+
+    payload = _make_payload(items=[{"item_id": "i1"}], sources=[{"bibtex": "s1"}])
+    error = mod.sync_to_arcadedb(_SlowThenGone(), payload, mode="rebuild")
+
+    assert error is not None
+    assert "did not answer" in error.details, "must name the timeout that caused it"
+    assert "not found or expired" not in error.details, "not the fallout"

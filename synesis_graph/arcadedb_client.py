@@ -56,6 +56,30 @@ TRANSIENT_GATEWAY_STATUSES = frozenset({502, 503, 504})
 #: ladder only delays an honest error.
 CONNECT_RETRY_ATTEMPTS = 3
 
+#: A 404 whose body says the transaction session is gone. The server discards a
+#: session when it decides the client has stopped answering, which is exactly
+#: what a slow moment produces: the write times out on our side, and the
+#: `rollback` (or the next statement) then finds no session to act on.
+#:
+#: This has to be recognised because it *masks the real failure*. A plain 404 is
+#: not retryable — a missing database or endpoint will stay missing — so when
+#: this one escaped it broke the retry loop and became the reported error,
+#: hiding the timeouts that actually caused the run to fail. Observed on a real
+#: 249,735-item export: two retry warnings, then `Remote transaction ... not
+#: found or expired`, with the timeouts nowhere in the final message.
+#:
+#: Matched on the body rather than on the status alone, so an ordinary 404
+#: keeps failing fast.
+_EXPIRED_SESSION_MARKERS = ("not found or expired", "transaction not found")
+
+
+def _is_expired_session(status: int | None, message: str, detail: str | None) -> bool:
+    """True for the 404 that means "your transaction is gone", not "no such thing"."""
+    if status != 404:
+        return False
+    haystack = f"{message} {detail or ''}".lower()
+    return any(marker in haystack for marker in _EXPIRED_SESSION_MARKERS)
+
 
 class ArcadeDBError(Exception):
     """An ArcadeDB request failed.
@@ -178,12 +202,17 @@ class ArcadeDBClient:
                     detail = raw_error[:500] or None
                     message = str(exc.reason)
                 gateway = exc.code in TRANSIENT_GATEWAY_STATUSES
+                # An expired transaction session is transient too: the server
+                # discarded it because we went quiet, which is what a slow
+                # moment produces. Left unclassified it broke the retry loop and
+                # replaced the timeouts that caused the failure.
+                expired = _is_expired_session(exc.code, str(message), detail)
                 raise ArcadeDBError(
                     self._gateway_message(exc.code) if gateway else str(message),
                     status=exc.code,
                     detail=detail,
-                    retryable=gateway,
-                    applied_unknown=gateway,
+                    retryable=gateway or expired,
+                    applied_unknown=gateway or expired,
                 ) from exc
             except TimeoutError as exc:
                 # Ours, not the server's: it may still be working on it.

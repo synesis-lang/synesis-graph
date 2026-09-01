@@ -13,6 +13,11 @@ torch and never fails because the extra is absent.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import logging
+import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -33,6 +38,8 @@ from synesis_graph.embeddings import (
     resolve_fields,
     sidecar_path,
 )
+
+logger = logging.getLogger("synesis2graph")
 
 INSTALL_HINT = 'Install with: pip install "synesis-graph[embeddings]"'
 
@@ -155,7 +162,8 @@ def encode_concepts(
                 details=INSTALL_HINT,
             )
         try:
-            model = factory(model_name)
+            with _quiet_model_loading():
+                model = factory(model_name)
         except Exception as exc:  # noqa: BLE001 — surfaced to the user verbatim
             return DependencyError(
                 message=f"Could not load embedding model '{model_name}'",
@@ -265,6 +273,36 @@ def generate(
     sidecar.dimensions = result.dimensions
     sidecar.vectors = {**reused, **result.vectors}
     return sidecar
+
+
+
+@contextlib.contextmanager
+def _quiet_model_loading() -> Iterator[None]:
+    """Keeps the model loader's own chatter out of the researcher's terminal.
+
+    Two sources that logger levels cannot reach, both observed on a first run:
+
+    - The Hub's "You are sending unauthenticated requests" notice, issued
+      through `warnings` AND mirrored into logging — so it printed twice. It is
+      advice about rate limits for someone doing bulk downloads, not a problem
+      with this export.
+    - `transformers` prints a "BertModel LOAD REPORT" table straight to stdout,
+      listing `embeddings.position_ids` as UNEXPECTED. That key is a known
+      artefact of the checkpoint's age and is harmless, but the word UNEXPECTED
+      in a table reads as a fault in the data.
+
+    Only stdout is captured. Anything the loader writes to stderr — a real
+    failure included — still reaches the terminal, and the exception itself is
+    unaffected because this only suppresses output.
+    """
+    buffer = io.StringIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with contextlib.redirect_stdout(buffer):
+            yield
+    captured = buffer.getvalue().strip()
+    if captured:
+        logger.debug("Model loader output: %s", captured)
 
 
 def prepare_embeddings(

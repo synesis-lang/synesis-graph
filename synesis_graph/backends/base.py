@@ -18,7 +18,13 @@ from synesis_graph.backends.arcadedb import (
 )
 from synesis_graph.backends.arcadedb import clear_database as arcadedb_clear_database
 from synesis_graph.backends.arcadedb import (
+    describe_running_load as arcadedb_describe_running_load,
+)
+from synesis_graph.backends.arcadedb import (
     incompatible_with_update as arcadedb_incompatible_with_update,
+)
+from synesis_graph.backends.arcadedb import (
+    load_is_incomplete as arcadedb_load_is_incomplete,
 )
 from synesis_graph.backends.arcadedb import (
     read_project_context as arcadedb_read_project_context,
@@ -344,10 +350,37 @@ class _ArcadeDBAdapterBase(BackendAdapter):
         today, so turning off only one of them would leave the other wiping the
         graph an incremental run meant to keep.
         """
+        # First, and before touching the client: in `update` this step does
+        # nothing at all, and it must stay callable on an adapter that never
+        # connected. Moving the connection check above this would turn a no-op
+        # into a "not connected" error.
         if self.mode == "update":
             return None
         if self.client is None:
             return self._not_connected()
+
+        # Before anything is written. A flag standing on the
+        # destination means some other run started and did not finish — either it
+        # is still going, or it died. Only the first is a reason to stop: two
+        # loaders on one graph interleave their writes and neither result is
+        # trustworthy. An abandoned flag is not a reason to stop; it is what a
+        # retry is supposed to find, and a rebuild clears it on the way past.
+        running = arcadedb_describe_running_load(
+            arcadedb_read_project_context(self.client)
+        )
+        if running is not None:
+            return SyncError(
+                message="Another load is already running against this graph",
+                stage="sync",
+                details=(
+                    f"Started by {running}. Two loads writing the same graph "
+                    "overwrite each other's work and neither result can be "
+                    "trusted. Wait for it to finish, or — if that run is known to "
+                    "be dead — re-run in a few minutes, once its mark has aged "
+                    "out, and this will clear it."
+                ),
+            )
+
         try:
             arcadedb_clear_database(self.client)
             return None
@@ -367,9 +400,43 @@ class _ArcadeDBAdapterBase(BackendAdapter):
         if self.mode == "update":
             # Checked here, against the destination, rather than trusted from
             # the config: only the graph knows what it was actually built with.
-            changed = arcadedb_incompatible_with_update(
-                arcadedb_read_project_context(self.client), payload
-            )
+            stored = arcadedb_read_project_context(self.client)
+            # A live loader must stop an update too. `clear_destination` carries
+            # this check for a rebuild, but it returns early in update — so
+            # without it here, an update would merge into a graph another process
+            # is actively writing, which is the one case where two writers do
+            # real damage to each other.
+            running = arcadedb_describe_running_load(stored)
+            if running is not None:
+                return SyncError(
+                    message="Another load is already running against this graph",
+                    stage="sync",
+                    details=(
+                        f"Started by {running}. Two loads writing the same graph "
+                        "overwrite each other's work and neither result can be "
+                        "trusted. Wait for it to finish, or — if that run is known "
+                        "to be dead — re-run in a few minutes, once its mark has "
+                        "aged out."
+                    ),
+                )
+            # An update merges into what is already there, so it must refuse a
+            # graph whose last load never finished: the leftovers of a failed,
+            # segment-committed sync are real vertices, and merging onto them
+            # would fold a partial corpus into the result with nothing left to
+            # say which rows are missing. A rebuild clears first, so it is the
+            # way out — and it is the only one this can honestly recommend.
+            if arcadedb_load_is_incomplete(stored):
+                return SyncError(
+                    message="The graph in the destination was left half-written",
+                    stage="sync",
+                    details=(
+                        "A previous load started and never finished, so this graph "
+                        "holds only part of its corpus. Updating would merge new "
+                        "data into an incomplete graph and the gap would stop being "
+                        "visible. Re-run without --mode update to rebuild it whole."
+                    ),
+                )
+            changed = arcadedb_incompatible_with_update(stored, payload)
             if changed:
                 return SyncError(
                     message="These settings changed and --mode update cannot apply them",

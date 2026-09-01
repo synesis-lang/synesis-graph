@@ -61,6 +61,27 @@ def _configure_logging(verbose: int, quiet: int) -> None:
     for _name in ("neo4j.notifications", "neo4j", "neo4j.io", "neo4j.pool"):
         logging.getLogger(_name).setLevel(_driver_level)
 
+    # Same problem, different library. Generating embeddings pulls the model
+    # from Hugging Face, and `basicConfig` above sets the ROOT level — so httpx
+    # narrates every HEAD request and redirect it makes. A first run printed
+    # more than twenty such lines, burying the three the researcher needs, and
+    # the redirects read like errors to someone who does not know the Hub.
+    #
+    # These are progress notes for a download, not diagnostics: silenced below
+    # WARNING, and `-v` brings them back.
+    for _name in (
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "huggingface_hub",
+        "filelock",
+        "sentence_transformers",
+        "sentence_transformers.SentenceTransformer",
+        "transformers",
+        "transformers.modeling_utils",
+    ):
+        logging.getLogger(_name).setLevel(_driver_level)
+
 
 # ---------------------------------------------------------------------------
 # Main help
