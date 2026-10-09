@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 from synesis_graph.backends.neo4j import _get_taxonomy_relation
-from synesis_graph.core import GraphPayload
+from synesis_graph.core import GraphPayload, topic_field_of
 from synesis_graph.sanitize import sanitize_cypher_label, validate_cypher_label
 from synesis_graph.ui import TaskReporter
 
@@ -58,7 +58,9 @@ def compute_metrics(session: Any, payload: GraphPayload, reporter: TaskReporter)
     # 1. Native metrics (always run)
     with reporter.step("Measuring the graph"):
         _compute_native_concept_metrics(session, concept_label)
-        _compute_native_taxonomy_metrics(session, concept_label, graph_fields)
+        _compute_native_taxonomy_metrics(
+            session, concept_label, graph_fields, getattr(payload, "field_specs", None)
+        )
         _compute_native_source_metrics(session, concept_label)
 
     # 2. GDS metrics (optional with fallback)
@@ -121,7 +123,8 @@ def _compute_native_concept_metrics(session: Any, concept_label: str) -> None:
 
 
 def _compute_native_taxonomy_metrics(
-    session: Any, concept_label: str, graph_fields: list[str]
+    session: Any, concept_label: str, graph_fields: list[str],
+    field_specs: dict[str, Any] | None = None,
 ) -> None:
     """
     Calculates native metrics for taxonomy nodes (Topic, Aspect, Dimension, etc).
@@ -149,11 +152,14 @@ def _compute_native_taxonomy_metrics(
             SET t.concept_count = cnt
         """)
 
-    # Topic-specific metrics (if exists)
-    if "topic" in graph_fields:
+    # Topic-specific metrics: o campo declarado TYPE TOPIC (o nome varia).
+    tf = topic_field_of(graph_fields, field_specs)
+    topic_label = sanitize_cypher_label(tf.capitalize()) if tf else ""
+    topic_rel = _get_taxonomy_relation(tf) if tf else ""
+    if tf and validate_cypher_label(topic_label) and validate_cypher_label(topic_rel):
         # Weighted degree (sum of IS_LINKED_TO strengths)
-        session.run("""
-            MATCH (t:Topic)
+        session.run(f"""
+            MATCH (t:{topic_label})
             OPTIONAL MATCH (t)-[r:IS_LINKED_TO]-()
             WITH t, coalesce(sum(r.strength), 0) AS wd
             SET t.weighted_degree = wd
@@ -162,7 +168,7 @@ def _compute_native_taxonomy_metrics(
         # Aspect diversity (if aspect exists)
         if "aspect" in graph_fields:
             session.run(f"""
-                MATCH (t:Topic)<-[:GROUPED_BY]-(c:{concept_label})
+                MATCH (t:{topic_label})<-[:{topic_rel}]-(c:{concept_label})
                 OPTIONAL MATCH (c)-[:QUALIFIED_BY]->(a:Aspect)
                 WITH t, count(DISTINCT a) AS div
                 SET t.aspect_diversity = div
@@ -171,7 +177,7 @@ def _compute_native_taxonomy_metrics(
         # Dimension diversity (if dimension exists)
         if "dimension" in graph_fields:
             session.run(f"""
-                MATCH (t:Topic)<-[:GROUPED_BY]-(c:{concept_label})
+                MATCH (t:{topic_label})<-[:{topic_rel}]-(c:{concept_label})
                 OPTIONAL MATCH (c)-[:BELONGS_TO]->(d:Dimension)
                 WITH t, count(DISTINCT d) AS div
                 SET t.dimension_diversity = div

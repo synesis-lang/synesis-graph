@@ -13,6 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — fields read by their declared TYPE, not by name
+
+Audit of 2026-10-09. In the case studies the TOPIC field is named `topic` in 35
+templates and `group`/`grupo`/`topico`/`category` in 11; CHAIN fields could take
+any name; CODE descriptions came from a project-specific field name.
+
+- **CHAIN:** `_extract_corpus_data` read `data["chain"]` and ignored
+  `chain_field_names`, which is already built from the field types. A CHAIN with
+  another name produced no chain in the graph. Chains now come from every CHAIN
+  field of the template; the name `chain` is only the fallback without a template.
+- **CODE:** the description of each code came from `justificativa_interna` /
+  `descricao` (names from one template). It now comes from the field bundled with
+  the CODE field (`BUNDLE ordem_2a, justificativa_interna`), via
+  `code_description_fields()`; the base text falls back to the template's MEMO
+  (e.g. `ordem_1a`) instead of a hardcoded name. The old names remain as fallback.
+- **TOPIC:** Topic→Topic `IS_LINKED_TO`, the Topic→Aspect / Topic→Dimension
+  mappings and the topic metrics looked for the field `topic` and the label
+  `Topic`, and silently skipped a TOPIC field with another name. They now use the
+  field declared `TYPE TOPIC` (`topic_field_of()`), with the label and relation the
+  taxonomy loop already gives it. **Labels are unchanged** (a field `grupo` still
+  becomes `Grupo`, so existing graphs keep their schema). `aspect`/`dimension`
+  stay name-based: they are project designs (Dooyeweerd, Wüstenhagen), not
+  language types.
+
 ## [0.12.0] - 2026-09-01
 
 ### Fixed — a large upload is no longer written as one giant transaction

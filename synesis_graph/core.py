@@ -1224,6 +1224,9 @@ def _build_graph_payload(
         quotation_field_name,
         project_root=project_root
         or project_root_from_includes(json_data.get("project") or {}, corpus),
+        code_descriptions=code_description_fields(
+            json_data.get("template") or {}, code_field_names
+        ),
     )
 
     # Reconcile chain/mention names against canonical ontology names (case-insensitive).
@@ -1238,7 +1241,9 @@ def _build_graph_payload(
     for mn in mentions:
         mn["concept"] = _canonical_map.get(mn["concept"].lower(), mn["concept"])
 
-    taxonomy_edges = _build_taxonomy_edges(concepts, graph_fields, chains)
+    taxonomy_edges = _build_taxonomy_edges(
+        concepts, graph_fields, chains, json_data.get("template", {}).get("field_specs", {})
+    )
 
     return GraphPayload(
         project_name=project_name,
@@ -1422,6 +1427,7 @@ def _build_taxonomy_edges(
     concepts: list[dict[str, Any]],
     graph_fields: list[str],
     chains: list[dict[str, Any]],
+    field_specs: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Derives taxonomy relations from the ontology, mirroring neo4j.py _sync_taxonomies.
 
@@ -1461,16 +1467,20 @@ def _build_taxonomy_edges(
             for val in _vals(relations, field_name):
                 edges.append({"source": concept_name, "target": val, "type": rel_type})
 
+    # Campo de tópico pelo TIPO (TOPIC); aspect/dimension seguem pelo nome (são
+    # desenhos de projeto — Dooyeweerd, Wüstenhagen — não tipos da linguagem).
+    tf = topic_field_of(graph_fields, field_specs)
+
     # Topic -> Aspect / Topic -> Dimension co-occurrence mappings
     _tax_maps = (("aspect", "MAPPED_TO_ASPECT"), ("dimension", "MAPPED_TO_DIMENSION"))
     for tax_field, rel_type in _tax_maps:
-        if "topic" in graph_fields and tax_field in graph_fields:
+        if tf and tax_field in graph_fields:
             seen_pairs: set[tuple[str, str]] = set()
             for row in concepts:
                 relations = row.get("relations", {})
                 if not isinstance(relations, dict):
                     continue
-                topics = _vals(relations, "topic")
+                topics = _vals(relations, tf)
                 others = _vals(relations, tax_field)
                 for t in topics:
                     for o in others:
@@ -1480,13 +1490,13 @@ def _build_taxonomy_edges(
 
     # Topic -> Topic (IS_LINKED_TO): strength = count of RELATES_TO between concepts of
     # two distinct topics. Mirrors the Cypher in neo4j.py _sync_taxonomies.
-    if "topic" in graph_fields and chains:
+    if tf and chains:
         concept_topics: dict[str, list[str]] = {}
         for row in concepts:
             props = row.get("props", {})
             relations = row.get("relations", {})
             if isinstance(props, dict) and isinstance(relations, dict) and props.get("name"):
-                concept_topics[props["name"]] = _vals(relations, "topic")
+                concept_topics[props["name"]] = _vals(relations, tf)
 
         strength: dict[tuple[str, str], int] = {}
         for ch in chains:
@@ -1625,6 +1635,43 @@ def _build_item_row(
     return row
 
 
+def topic_field_of(graph_fields: list[str], field_specs: dict[str, Any] | None) -> str | None:
+    """O campo de TÓPICO entre os graph_fields: o declarado TYPE TOPIC no template.
+
+    O nome varia por projeto (`topic` em 35 templates dos estudos de caso;
+    `group`, `grupo`, `topico`, `category` em 11). Os recursos próprios de tópico
+    (Topic→Topic IS_LINKED_TO, mapeamentos, métricas) procuravam o nome `topic`
+    e sumiam em silêncio nos demais. Sem tipo conhecido, cai no nome `topic`.
+    """
+    for name in graph_fields:
+        spec = (field_specs or {}).get(name) or {}
+        if str(spec.get("type", "")).upper() == "TOPIC":
+            return name
+    return "topic" if "topic" in graph_fields else None
+
+
+def code_description_fields(
+    template: dict[str, Any], code_field_names: list[str]
+) -> dict[str, str]:
+    """{campo CODE: campo que o descreve}, pelo BUNDLE declarado no template.
+
+    Antes, a descrição de cada código vinha de `justificativa_interna`/`descricao`
+    (nomes de um template específico). O template já declara a ligação:
+    `BUNDLE ordem_2a, justificativa_interna`.
+    """
+    out: dict[str, str] = {}
+    bundles = list(((template or {}).get("bundled_fields") or {}).get("ITEM") or [])
+    bundles += list(((template or {}).get("optional_bundles") or {}).get("ITEM") or [])
+    for bundle in bundles:
+        membros = [str(m) for m in (bundle or [])]
+        for cf in code_field_names:
+            if cf in membros and cf not in out:
+                parceiro = next((m for m in membros if m != cf and m not in code_field_names), None)
+                if parceiro:
+                    out[cf] = parceiro
+    return out
+
+
 def _extract_corpus_data(
     corpus: list[dict[str, Any]],
     bibliography: dict[str, Any],
@@ -1636,6 +1683,7 @@ def _extract_corpus_data(
     memo_field_name: str = "note",
     quotation_field_name: str = "citation",
     project_root: str = "",
+    code_descriptions: dict[str, str] | None = None,
 ) -> tuple[
     list[dict[str, Any]],  # sources
     list[dict[str, Any]],  # items
@@ -1710,12 +1758,19 @@ def _extract_corpus_data(
 
         data = corpus_item["data"]
 
-        # Detect template pattern
-        has_chain = "chain" in data and data["chain"]
+        # Detect template pattern. Cadeias de TODOS os campos CHAIN do template
+        # (pelo tipo); o nome `chain` só vale sem template (chain_field_names vazio).
+        campos_chain = chain_field_names or (["chain"] if "chain" in data else [])
+        chain_list = [
+            hop
+            for cf in campos_chain
+            for hop in (data.get(cf) if isinstance(data.get(cf), list) else [data.get(cf)])
+            if isinstance(hop, dict)
+        ]
+        has_chain = bool(chain_list)
         has_code = any(cf in data and data[cf] for cf in code_field_names)
 
         if has_chain:
-            chain_list = data.get("chain", [])
             raw_memo = data.get(memo_field_name, [])
             # Parallel list: one note per triple (bibliometrics format).
             # Single string or absent: shared description across all triples (causation format).
@@ -1805,14 +1860,21 @@ def _extract_corpus_data(
             if not isinstance(code_list, list):
                 code_list = [code_list]
 
-            # Extract descriptions if available (corresponding bundled field)
-            descriptions = data.get("justificativa_interna", []) or data.get("descricao", [])
+            # Descrição de cada código: o campo empacotado com ele (BUNDLE no
+            # template); os nomes antigos ficam só como reserva.
+            parceiro = (code_descriptions or {}).get(code_field)
+            descriptions = (
+                (data.get(parceiro) if parceiro else None)
+                or data.get("justificativa_interna", [])
+                or data.get("descricao", [])
+            )
             if not isinstance(descriptions, list):
                 descriptions = [descriptions] * len(code_list)
 
-            # Extract base text — template QUOTATION field first, then common aliases
+            # Base text — QUOTATION do template, depois o MEMO do template (ex.:
+            # `ordem_1a`, codificação de 1ª ordem), e só então nomes comuns.
             base_text = ""
-            for field_name in [quotation_field_name, "ordem_1a", "text", "citation"]:
+            for field_name in [quotation_field_name, memo_field_name, "text", "citation"]:
                 if field_name in data and data[field_name]:
                     val = data[field_name]
                     base_text = val[0] if isinstance(val, list) else val

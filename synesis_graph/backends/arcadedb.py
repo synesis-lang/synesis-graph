@@ -1156,7 +1156,8 @@ def _execute_sync_transaction(
         # built here, and they are derived from these same rows. Narrowing this
         # to the local would silently drop every GROUPED_BY/QUALIFIED_BY edge.
         _sync_taxonomies(
-            tx, payload.concepts, payload.graph_fields, payload.concept_label, batch_size=bs
+            tx, payload.concepts, payload.graph_fields, payload.concept_label, batch_size=bs,
+            field_specs=payload.field_specs,
         )
         _sync_mentions(tx, payload.mentions, payload.concept_label, batch_size=bs)
         _sync_entities(tx, payload.entities, batch_size=bs)

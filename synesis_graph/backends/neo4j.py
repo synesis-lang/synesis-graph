@@ -13,6 +13,7 @@ from synesis_graph.core import (
     dedupe_index_props,
     get_taxonomy_labels,
     text_source_field_names,
+    topic_field_of,
 )
 from synesis_graph.linkage import REFERS_TO_RELATION
 from synesis_graph.sanitize import sanitize_cypher_label, validate_cypher_label
@@ -217,7 +218,10 @@ def _execute_sync_transaction(
         _sync_concepts(
             tx, payload.chains, payload.concepts, payload.concept_label, mode=mode
         )
-        _sync_taxonomies(tx, payload.concepts, payload.graph_fields, payload.concept_label)
+        _sync_taxonomies(
+            tx, payload.concepts, payload.graph_fields, payload.concept_label,
+            field_specs=payload.field_specs,
+        )
         _sync_mentions(tx, payload.mentions, payload.concept_label)
         # Reified identities must exist before the edges that point at them.
         _sync_entities(tx, payload.entities)
@@ -511,6 +515,7 @@ def _sync_taxonomies(
     graph_fields: list[str],
     concept_label: str,
     batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
+    field_specs: dict[str, Any] | None = None,
 ) -> None:
     """
     Creates taxonomy nodes and semantic relationships from concept nodes.
@@ -571,15 +576,24 @@ def _sync_taxonomies(
         """
         _run_in_batches(tx, query, relation_rows, batch_size)
 
-    # Second: create mapping relations between taxonomies
+    # Second: create mapping relations between taxonomies. O campo de tópico é o
+    # declarado TYPE TOPIC (o nome varia: `topic`, `grupo`, `category`...), com o
+    # rótulo e a relação que o laço acima já lhe deu; aspect/dimension seguem pelo
+    # nome (desenhos de projeto, não tipos da linguagem).
+    tf = topic_field_of(graph_fields, field_specs)
+    topic_label = sanitize_cypher_label(tf.capitalize()) if tf else ""
+    topic_rel = _get_taxonomy_relation(tf) if tf else ""
+    if tf and not (validate_cypher_label(topic_label) and validate_cypher_label(topic_rel)):
+        tf = None
+
     # Topic -> Aspect (MAPPED_TO_ASPECT)
-    if "topic" in graph_fields and "aspect" in graph_fields:
+    if tf and "aspect" in graph_fields:
         mapping_rows: list[dict[str, Any]] = []
         for row in concepts:
             relations = row.get("relations", {})
             if not isinstance(relations, dict):
                 continue
-            topics_raw = relations.get("topic")
+            topics_raw = relations.get(tf)
             aspects_raw = relations.get("aspect")
             if topics_raw is None or aspects_raw is None:
                 continue
@@ -593,12 +607,12 @@ def _sync_taxonomies(
         if mapping_rows:
             _run_in_batches(
                 tx,
-                """
+                f"""
                 UNWIND $rows AS row
                 UNWIND row.topics AS topic_val
                 UNWIND row.aspects AS aspect_val
-                MATCH (topic:Topic {name: topic_val})
-                MATCH (aspect:Aspect {name: aspect_val})
+                MATCH (topic:{topic_label} {{name: topic_val}})
+                MATCH (aspect:Aspect {{name: aspect_val}})
                 MERGE (topic)-[:MAPPED_TO_ASPECT]->(aspect)
             """,
                 mapping_rows,
@@ -606,13 +620,13 @@ def _sync_taxonomies(
             )
 
     # Topic -> Dimension (MAPPED_TO_DIMENSION)
-    if "topic" in graph_fields and "dimension" in graph_fields:
+    if tf and "dimension" in graph_fields:
         mapping_rows: list[dict[str, Any]] = []
         for row in concepts:
             relations = row.get("relations", {})
             if not isinstance(relations, dict):
                 continue
-            topics_raw = relations.get("topic")
+            topics_raw = relations.get(tf)
             dimensions_raw = relations.get("dimension")
             if topics_raw is None or dimensions_raw is None:
                 continue
@@ -626,12 +640,12 @@ def _sync_taxonomies(
         if mapping_rows:
             _run_in_batches(
                 tx,
-                """
+                f"""
                 UNWIND $rows AS row
                 UNWIND row.topics AS topic_val
                 UNWIND row.dimensions AS dimension_val
-                MATCH (topic:Topic {name: topic_val})
-                MATCH (dimension:Dimension {name: dimension_val})
+                MATCH (topic:{topic_label} {{name: topic_val}})
+                MATCH (dimension:Dimension {{name: dimension_val}})
                 MERGE (topic)-[:MAPPED_TO_DIMENSION]->(dimension)
             """,
                 mapping_rows,
@@ -640,14 +654,14 @@ def _sync_taxonomies(
 
     # Topic -> Topic (IS_LINKED_TO) - connects topics via RELATES_TO between their concepts
     # strength = number of RELATES_TO relations between concepts of both topics
-    if "topic" in graph_fields:
+    if tf:
         cl = concept_label
         # Sem lote de propósito: esta é uma agregação server-side sobre dados
         # já gravados, não um `UNWIND $rows`. Não há lista a fatiar — o custo
         # é da travessia, e dividi-la mudaria o `count(*)` de cada grupo.
         tx.run(
-            f"MATCH (t1:Topic)<-[:GROUPED_BY]-(f1:{cl})-[:RELATES_TO]->(f2:{cl})"
-            "-[:GROUPED_BY]->(t2:Topic) "
+            f"MATCH (t1:{topic_label})<-[:{topic_rel}]-(f1:{cl})-[:RELATES_TO]->(f2:{cl})"
+            f"-[:{topic_rel}]->(t2:{topic_label}) "
             "WHERE t1 <> t2 "
             "WITH t1, t2, count(*) AS strength "
             "MERGE (t1)-[r:IS_LINKED_TO]->(t2) "
