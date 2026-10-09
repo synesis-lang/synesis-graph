@@ -13,6 +13,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-09
+
+### Fixed — Neo4j also writes in segments
+
+The same failure, on the other backend: a whole corpus in one transaction is
+bounded by the server's transaction memory, and the real corpus exceeded a
+stock 1 GB Neo4j's 717 MB per-transaction ceiling 149s in
+(`MemoryPoolOutOfMemoryError`), writing nothing.
+
+Neo4j now commits in segments counted in **rows**, not statements
+(`SYNC_COMMIT_ROWS = 100_000`). A first attempt committed every 10 statements,
+which at 50,000 rows per batch was 500,000 rows — almost exactly the ceiling it
+had to stay under — and failed identically at 142s. `_SegmentedTx` drains each
+result before a commit and rolls back the open segment on failure.
+
+### Added — the load mark and its guards on Neo4j too
+
+Segments on Neo4j bring the same trade as on ArcadeDB, so the same answer: the
+`ProjectContext` `load_state` mark (raised in the first segment, refreshed by a
+heartbeat at each segment commit, lowered only after the last), and the two
+guards — a second load refuses to start while one is running, and
+`--mode update` refuses a half-written graph. The pure parts (constants,
+`describe_running_load`, `load_is_incomplete`) moved to
+`backends/load_state.py`, shared by both backends; `arcadedb` re-exports them.
+
+### Changed — metric cost estimates scale by edges and calibrate to the server
+
+The estimate announced "about 4 minutes" for work that took eleven, and two of
+three metrics exceeded a timeout the researcher had been told was ample.
+
+- Cost now scales by **edges** with each algorithm's published complexity
+  (PageRank ~E, Louvain ~E·log V, betweenness ~V·E), from a measured reference
+  graph (275,687 vertices, 820,388 edges); Louvain's fallback rate is measured
+  (640s), no longer borrowed from betweenness.
+- **Calibration**: PageRank runs first anyway, so its real time is measured and
+  scales the estimates of the expensive pair — at no extra cost.
+- A metric estimated longer than the per-request timeout is **warned about
+  before it starts**, naming `[arcadedb].timeout`, `--metrics fast` or a faster
+  machine.
+
 ### Fixed — fields read by their declared TYPE, not by name
 
 Audit of 2026-10-09. In the case studies the TOPIC field is named `topic` in 35
@@ -36,8 +76,6 @@ any name; CODE descriptions came from a project-specific field name.
   becomes `Grupo`, so existing graphs keep their schema). `aspect`/`dimension`
   stay name-based: they are project designs (Dooyeweerd, Wüstenhagen), not
   language types.
-
-## [0.12.0] - 2026-09-01
 
 ### Fixed — a large upload is no longer written as one giant transaction
 

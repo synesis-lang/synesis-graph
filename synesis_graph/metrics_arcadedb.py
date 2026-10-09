@@ -15,6 +15,7 @@ than assumed. See `_persist_scores` and `SCOPE_NOTE`.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -68,15 +69,52 @@ class _CypherRunner:
         return self._client.command(query, params or None)
 
 
-#: Seconds per 100,000 vertices, per algorithm, measured end to end against the
-#: Hostinger container (2 vCPUs) on a 272,193-vertex graph: PageRank 8.5s,
-#: betweenness 109s. Rounded up rather than fitted — the point is to tell a
-#: researcher whether to wait or come back later, and an estimate that runs
-#: short reads as a stall.
+#: Seconds per 100,000 vertices, per algorithm, on the reference graph.
 #:
-#: Louvain is not listed because it has not been measured to completion; it is
-#: estimated at betweenness's rate, which is the pessimistic assumption.
-_SECONDS_PER_100K = {"PageRank": 4.0, "Betweenness": 45.0, "Communities (Louvain)": 45.0}
+#: A fallback, used until `calibrate` measures the server in front of us. All
+#: three are now measured rather than assumed: PageRank 8.5s and betweenness
+#: 109s on a 2-vCPU container, Louvain 640s on a 16-core machine, each over the
+#: same 275,687-vertex corpus.
+#:
+#: Louvain's was 45 until it was measured — a value carried over from
+#: betweenness on the reasoning that it "had not been measured to completion,
+#: and betweenness is the pessimistic assumption". It was not pessimistic: the
+#: real figure is five times higher, and that gap is what told a researcher to
+#: expect four minutes of work that took eleven.
+_SECONDS_PER_100K = {"PageRank": 4.0, "Betweenness": 45.0, "Communities (Louvain)": 232.0}
+
+#: How each algorithm's cost grows, as an exponent on the EDGE count.
+#:
+#: Taken from the published complexity of each algorithm rather than fitted to
+#: our own timings, and driven by edges rather than vertices, because that is
+#: what all three actually traverse:
+#:
+#:   PageRank     O(k·E)      — a fixed number of sweeps over the edges
+#:   Louvain      O(E·log V)  — Blondel et al. 2008
+#:   Betweenness  O(V·E)      — Brandes 2001, unweighted
+#:
+#: In a sparse graph (this corpus runs E ≈ 3·V) that puts PageRank and Louvain
+#: at roughly linear in E, and betweenness at roughly quadratic. The `log V` and
+#: the `V` factor are folded into the exponent rather than modelled separately:
+#: over the range a research corpus spans, the difference is far below the error
+#: of the thing being estimated.
+#:
+#: An earlier version of this fitted an exponent of 2.4 to two of our own
+#: measurements. It was wrong, and worth recording why: the two graphs were not
+#: the same shape — one had 36 taxonomy vertices where the other had 22,886
+#: concepts joined by 145,161 edges — so the pair measured a change in structure
+#: and read it as a change in size. Two points cannot separate those. Published
+#: complexity can, which is why it is the source here.
+_COST_EXPONENT = {"PageRank": 1.0, "Betweenness": 2.0, "Communities (Louvain)": 1.1}
+
+#: The graph the fallback rates were measured on. Scaling from a reference point
+#: is what makes a non-linear model expressible as a single rate: cost at any
+#: other size is the rate times the size ratio raised to the exponent.
+#:
+#: Both are recorded because the ratio between them is the graph's density, and
+#: an estimate driven by edges needs the edge count of the point it scales from.
+_REFERENCE_VERTICES = 275_687
+_REFERENCE_EDGES = 820_388
 
 #: Which metrics each `--metrics` choice runs. `all` is the default because the
 #: numbers are research output, not diagnostics: centrality is what answers
@@ -89,38 +127,172 @@ METRIC_SETS: dict[str, tuple[str, ...]] = {
 }
 
 
-def estimate_metric_seconds(vertex_count: int, names: Sequence[str]) -> float:
-    """Rough wall-clock cost of running `names` over a graph of this size.
+def estimate_metric_seconds(
+    vertex_count: int,
+    names: Sequence[str],
+    calibration: float | None = None,
+    edge_count: int | None = None,
+) -> float:
+    """Wall-clock cost of running `names` over a graph of this size.
 
-    Deliberately crude. It exists so the researcher can decide whether to wait,
-    and for that a figure within a factor of two is enough — while a
-    precise-looking number that proves wrong costs more trust than an admitted
-    approximation. The rates come from one server; a slower box will take
-    longer, which is why the output is phrased as "about".
+    Two things make this more than a guess now. The cost grows with an exponent
+    per algorithm rather than linearly, and `calibration` — when given — is a
+    measurement of *this* server rather than a rate carried over from another.
+
+    `calibration` is the ratio of what PageRank actually took here to what the
+    reference rates predict for it. A server half as fast returns 2.0, and every
+    estimate doubles. Without it the reference rates are used unscaled, which is
+    the old behaviour and still the fallback when the probe cannot run.
+
+    Still an estimate, and phrased as one to the researcher: the exponents come
+    from each algorithm's published complexity (see `_COST_EXPONENT`) and the
+    rates from one reference corpus, so a graph of a very different shape will
+    depart from it. The point is that it is now wrong by tens of percent instead
+    of by a factor of five.
     """
-    per_100k = sum(_SECONDS_PER_100K.get(n, 0.0) for n in names)
-    return per_100k * max(vertex_count, 0) / 100_000
+    if vertex_count <= 0:
+        return 0.0
+    scale = calibration if calibration and calibration > 0 else 1.0
+    # Edges are what the algorithms traverse. When the caller does not know the
+    # count, the reference graph's density stands in — wrong for an unusually
+    # dense or sparse corpus, but far closer than ignoring edges altogether.
+    if edge_count and edge_count > 0:
+        edges = edge_count
+    else:
+        edges = vertex_count * _REFERENCE_EDGES / _REFERENCE_VERTICES
+    ratio = edges / _REFERENCE_EDGES
+    total = 0.0
+    for name in names:
+        rate = _SECONDS_PER_100K.get(name, 0.0)
+        if not rate:
+            continue
+        reference_cost = rate * _REFERENCE_VERTICES / 100_000
+        total += reference_cost * ratio ** _COST_EXPONENT.get(name, 1.0)
+    return total * scale
+
+
+def calibration_from(
+    observed_seconds: float, vertex_count: int, edge_count: int | None = None
+) -> float | None:
+    """Turns an observed PageRank time into a multiplier for this server.
+
+    PageRank is the reference point because it is the cheap one — seconds where
+    the other two cost minutes — and because it traverses the same graph they
+    will. Its cost is where a slow disk, a busy CPU or a 2-vCPU container shows
+    up, so it carries exactly the information the estimate was missing.
+
+    It is *timed*, never run for this purpose: the pipeline runs PageRank first
+    anyway, so calibration costs nothing. An earlier version called it a second
+    time to measure it, which doubled the one algorithm the researcher was
+    already paying for.
+
+    Returns None when there is nothing to compare against, and the caller falls
+    back to the reference rates.
+    """
+    expected = estimate_metric_seconds(
+        vertex_count, ["PageRank"], edge_count=edge_count
+    )
+    if expected <= 0 or observed_seconds <= 0:
+        return None
+    return observed_seconds / expected
 
 
 def _announce_metric_cost(
-    reporter: TaskReporter, vertex_count: int, names: Sequence[str]
+    reporter: TaskReporter,
+    vertex_count: int,
+    names: Sequence[str],
+    *,
+    edge_count: int | None = None,
+    calibration: float | None = None,
+    timeout: float = 0.0,
 ) -> None:
-    """Says what the expensive step will cost, before the silence starts.
+    """Says what the expensive step will cost, and whether it can finish.
 
     Centrality over a large graph is minutes of no output, and the researcher
     has no way to tell that from a hang. Telling them first turns waiting into a
     decision — and names `--metrics fast` as the way out, so the choice is real.
+
+    `timeout` adds the second half of that: an estimate that exceeds the
+    per-request limit is announced as a warning before the work starts, rather
+    than discovered as a failure after the budget is spent.
     """
     if not names:
         return
-    seconds = estimate_metric_seconds(vertex_count, names)
-    if seconds < 60:
-        return
-    reporter.info(
-        f"Calculating {', '.join(names)} over {vertex_count:,} vertices. "
-        f"This usually takes about {round(seconds / 60)} minute(s), with no "
-        "output until it finishes. Use --metrics fast to skip the slow ones."
+    seconds = estimate_metric_seconds(
+        vertex_count, names, calibration=calibration, edge_count=edge_count
     )
+    if seconds >= 60:
+        reporter.info(
+            f"Calculating {', '.join(names)} over {vertex_count:,} vertices. "
+            f"This usually takes about {round(seconds / 60)} minute(s), with no "
+            "output until it finishes. Use --metrics fast to skip the slow ones."
+        )
+
+    _warn_if_over_budget(
+        reporter,
+        vertex_count,
+        names,
+        edge_count=edge_count,
+        calibration=calibration,
+        timeout=timeout,
+    )
+
+
+def _warn_if_over_budget(
+    reporter: TaskReporter,
+    vertex_count: int,
+    names: Sequence[str],
+    *,
+    edge_count: int | None = None,
+    calibration: float | None = None,
+    timeout: float = 0.0,
+) -> None:
+    """Warns about metrics that cannot finish inside the request timeout.
+
+    Whether the server will be *allowed* to finish is a different question from
+    how long the work takes, and it is the one the researcher could not
+    previously ask. A metric needing longer than the timeout does not fail
+    because the graph is too big or the server too small — it fails because it
+    ran out of permission, after spending the whole budget first. Saying so
+    beforehand turns a wasted wait into a choice: raise the limit, drop the
+    metric, or compute it somewhere faster.
+
+    Called twice on a normal run — once before anything starts, from the
+    reference rates, and again once PageRank has measured this server. The
+    second is the one worth trusting, and it still arrives before the expensive
+    pair begins.
+    """
+    if timeout <= 0:
+        return
+    for name in names:
+        cost = estimate_metric_seconds(
+            vertex_count, [name], calibration=calibration, edge_count=edge_count
+        )
+        if cost <= timeout:
+            continue
+        reporter.warning(
+            f"{name} is estimated at about {round(cost / 60)} minute(s) on this "
+            f"server, which is longer than the {round(timeout / 60)}-minute "
+            f"limit for a single request — it will most likely time out and be "
+            f"skipped. Raise it with [arcadedb].timeout = {int(cost * 1.5)}, "
+            f"drop it with --metrics fast, or compute it on a faster machine."
+        )
+
+
+def _count_edges(client: ArcadeDBTransport) -> int:
+    """Total edges, which is what the cost of these algorithms actually scales on.
+
+    All three traverse edges — PageRank sweeps them, Louvain aggregates over
+    them, betweenness walks paths built from them — so an estimate driven by
+    vertices alone misreads any graph whose density differs from the reference.
+    Returns 0 when it cannot be counted, and the estimate falls back to assuming
+    the reference density.
+    """
+    try:
+        rows = client.query("MATCH ()-[r]->() RETURN count(r) AS n")
+        return int(rows[0].get("n", 0)) if rows else 0
+    except ArcadeDBError:
+        return 0
 
 
 def _count_vertices(client: ArcadeDBTransport) -> int:
@@ -173,7 +345,12 @@ def compute_metrics(
         )
         return
 
-    _announce_metric_cost(reporter, _count_vertices(client), selected)
+    vertices = _count_vertices(client)
+    edges = _count_edges(client)
+    timeout = float(getattr(client, "timeout", 0.0) or 0.0)
+    _announce_metric_cost(
+        reporter, vertices, selected, edge_count=edges, timeout=timeout
+    )
 
     runners = {
         "PageRank": _run_pagerank,
@@ -181,10 +358,26 @@ def compute_metrics(
         "Communities (Louvain)": _run_louvain,
     }
     with reporter.step("Finding central concepts and communities"):
+        calibration: float | None = None
         for label in selected:
             try:
+                started = time.monotonic()
                 updated = runners[label](client, concept_label)
+                elapsed = time.monotonic() - started
                 reporter.success(f"{label} calculated ({updated} nodes)")
+                # PageRank is the cheap one and runs first, so its real cost
+                # measures this server before the expensive pair is attempted.
+                # Timed, not re-run: the calibration is free.
+                if label == "PageRank":
+                    calibration = calibration_from(elapsed, vertices, edges)
+                    _warn_if_over_budget(
+                        reporter,
+                        vertices,
+                        [n for n in selected if n != "PageRank"],
+                        edge_count=edges,
+                        calibration=calibration,
+                        timeout=timeout,
+                    )
             except ArcadeDBError as e:
                 reporter.warning(f"{label} failed: {e}")
 

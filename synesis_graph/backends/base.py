@@ -30,7 +30,9 @@ from synesis_graph.backends.arcadedb import (
     read_project_context as arcadedb_read_project_context,
 )
 from synesis_graph.backends.arcadedb import sync_to_arcadedb
+from synesis_graph.backends.load_state import describe_running_load, load_is_incomplete
 from synesis_graph.backends.neo4j import SyncMode, sync_to_neo4j
+from synesis_graph.backends.neo4j import read_project_context as neo4j_read_project_context
 from synesis_graph.config import (
     BACKEND_ARCADEDB,
     BACKEND_ARCADEDB_EMBEDDED,
@@ -255,6 +257,37 @@ class Neo4jBackendAdapter(BackendAdapter):
             return ConnectionError(
                 message="Neo4j session not initialized",
                 stage="connection",
+            )
+
+        # The same two guards as ArcadeDB, now that Neo4j also commits in
+        # segments and an interrupted load can leave a partial graph. Both modes
+        # check for a live loader here, because Neo4j clears inside
+        # `sync_to_neo4j` — there is no separate `clear_destination` step to
+        # carry it for a rebuild.
+        stored = neo4j_read_project_context(self.session)
+        running = describe_running_load(stored)
+        if running is not None:
+            return SyncError(
+                message="Another load is already running against this graph",
+                stage="sync",
+                details=(
+                    f"Started by {running}. Two loads writing the same graph "
+                    "overwrite each other's work and neither result can be "
+                    "trusted. Wait for it to finish, or — if that run is known to "
+                    "be dead — re-run in a few minutes, once its mark has aged "
+                    "out, and this will clear it."
+                ),
+            )
+        if self.mode == "update" and load_is_incomplete(stored):
+            return SyncError(
+                message="The graph in the destination was left half-written",
+                stage="sync",
+                details=(
+                    "A previous load started and never finished, so this graph "
+                    "holds only part of its corpus. Updating would merge new "
+                    "data into an incomplete graph and the gap would stop being "
+                    "visible. Re-run without --mode update to rebuild it whole."
+                ),
             )
 
         with reporter.step(_sync_step_label("Building the graph", self.mode)) as step:

@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import asdict
 from typing import Any, Literal
 
+from synesis_graph.backends.load_state import (
+    LOAD_COMPLETE,
+    LOAD_HEARTBEAT_PROP,
+    LOAD_IN_PROGRESS,
+    LOAD_OWNER_PROP,
+    LOAD_STATE_PROP,
+    _load_owner_id,
+)
 from synesis_graph.core import (
     DEFAULT_FULLTEXT_ANALYZER,
     GraphPayload,
@@ -17,6 +27,8 @@ from synesis_graph.core import (
 )
 from synesis_graph.linkage import REFERS_TO_RELATION
 from synesis_graph.sanitize import sanitize_cypher_label, validate_cypher_label
+
+logger = logging.getLogger("synesis2graph")
 
 
 def clear_database(session: Any) -> None:
@@ -51,7 +63,7 @@ def sync_to_neo4j(
     mode: SyncMode = "rebuild",
 ) -> SyncError | None:
     """
-    Synchronizes payload with Neo4j in a single transaction.
+    Synchronizes payload with Neo4j, committing in segments.
 
     In `rebuild` (the default, and what every caller did before the mode
     existed) the database is cleared first, so the compiler is the source of
@@ -87,9 +99,50 @@ def sync_to_neo4j(
         if mode == "rebuild":
             _create_search_indexes(session, payload, fulltext_analyzer)
         _execute_sync_transaction(session, payload, mode)
+        # Lowered only now, outside the segments: tying "the load finished" to a
+        # transaction that could still be discarded would defeat the mark.
+        if payload.project_context is not None:
+            _set_load_state(session, LOAD_COMPLETE)
         return None
     except Exception as e:
         return SyncError(message="Synchronization failed", stage="sync", details=str(e))
+
+
+def _set_load_state(session: Any, state: str) -> None:
+    """Records on `ProjectContext` whether a load is running or finished.
+
+    Auto-commit, outside the segmented transactions — see the ArcadeDB
+    counterpart for why. Silent on failure: bookkeeping must not break a sync
+    that already wrote everything.
+    """
+    try:
+        result = session.run(
+            f"MATCH (p:ProjectContext) SET p.{LOAD_STATE_PROP} = $state", state=state
+        )
+        consume = getattr(result, "consume", None)
+        if callable(consume):
+            consume()
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a sync
+        logger.debug("Could not record load state %r: %s", state, exc)
+
+
+def read_project_context(session: Any) -> dict[str, Any] | None:
+    """The stored `ProjectContext` properties, or None (empty or older graph).
+
+    What the load guards read: only the graph knows whether its last load
+    finished, and that load may have run from another machine.
+    """
+    try:
+        record = session.run("MATCH (p:ProjectContext) RETURN p LIMIT 1").single()
+    except Exception:  # noqa: BLE001 - an empty database is the safe answer
+        return None
+    if record is None:
+        return None
+    node = record["p"]
+    try:
+        return dict(node)
+    except (TypeError, ValueError):
+        return None
 
 
 def _create_constraints(
@@ -196,10 +249,101 @@ def _create_search_indexes(
         _create("source_search", "(s:Source)", source_props)
 
 
+class _SegmentedTx:
+    """A `tx`-shaped object that commits every `commit_every` statements.
+
+    The `_sync_*` functions take a transaction and only ever call `.run()`, so a
+    stand-in with the same shape can decide when to commit without any of them
+    changing. The same approach the ArcadeDB backend uses, adapted to the driver:
+    a Neo4j transaction cannot be reopened once committed, so this holds the
+    session and opens a fresh transaction each time.
+
+    Segmenting trades one guarantee for another, and the trade has to be stated.
+    A single transaction meant a failed sync left nothing behind; segments mean a
+    failure leaves the segments that already committed. `rebuild` clears first,
+    so a retry starts clean rather than merging onto the wreckage — but an
+    interrupted load does leave a partial graph, and callers that need to know
+    that must record it.
+    """
+
+    def __init__(self, session: Any, commit_rows: int, heartbeat: bool = False):
+        self._session = session
+        self._commit_rows = max(commit_rows, 0)
+        self._rows_since_commit = 0
+        # Off unless the payload has a `ProjectContext` to carry it (see
+        # `_execute_sync_transaction`).
+        self._heartbeat = heartbeat
+        self._tx = session.begin_transaction()
+
+    def run(self, query: str, **params: Any) -> Any:
+        result = self._tx.run(query, **params)
+        # Neo4j results stream from the transaction that produced them, so a
+        # commit invalidates any that has not been drained. The `_sync_*`
+        # functions are all writes and never read their results, but draining
+        # here makes that independent of them rather than an assumption about
+        # them.
+        #
+        # Guarded rather than assumed: a test double returns a plain list, and a
+        # transaction shim that has no streaming to drain is not an error.
+        consume = getattr(result, "consume", None)
+        if callable(consume):
+            result = consume()
+        # The row count is what bounds the transaction's memory, so that is what
+        # is counted. `rows` is the parameter every `_sync_*` batch passes; a
+        # statement without it still counts as one unit of work.
+        batch = params.get("rows")
+        self._advance(len(batch) if isinstance(batch, list) else 1)
+        return result
+
+    def _advance(self, rows: int) -> None:
+        if self._commit_rows <= 0:
+            return
+        self._rows_since_commit += rows
+        if self._rows_since_commit < self._commit_rows:
+            return
+        self._rows_since_commit = 0
+        # Refreshed with each segment, inside the transaction about to commit —
+        # what keeps a live loader's flag from ageing into "abandoned" while it is
+        # still working. Same rule as the ArcadeDB runner, and best-effort for the
+        # same reason: bookkeeping must not fail a load.
+        if self._heartbeat:
+            try:
+                beat = self._tx.run(
+                    f"MATCH (p:ProjectContext) SET p.{LOAD_HEARTBEAT_PROP} = $beat",
+                    beat=time.time(),
+                )
+                consume = getattr(beat, "consume", None)
+                if callable(consume):
+                    consume()
+            except Exception as exc:  # noqa: BLE001 - must not fail a load
+                logger.debug("Could not refresh the load heartbeat: %s", exc)
+        self._tx.commit()
+        self._tx = self._session.begin_transaction()
+
+    def commit(self) -> None:
+        """Commits whatever the last segment left open."""
+        self._tx.commit()
+
+    def close(self) -> None:
+        """Rolls back an unfinished transaction, if one is still open."""
+        try:
+            closed = getattr(self._tx, "closed", None)
+            if callable(closed) and closed():
+                return
+            self._tx.rollback()
+        except Exception as cleanup:  # noqa: BLE001 - the original error wins
+            logger.debug("Rollback after a failed sync also failed: %s", cleanup)
+
+
 def _execute_sync_transaction(
     session: Any, payload: GraphPayload, mode: SyncMode = "rebuild"
 ) -> None:
-    """Executes all sync operations in a single transaction.
+    """Executes all sync operations, committing in segments.
+
+    Not one transaction: a whole corpus in a single transaction is bounded by
+    the server's transaction memory, and the real corpus exceeded a stock 1 GB
+    server's 717 MB ceiling 149s in, writing nothing. Committing in segments
+    keeps each one small enough to fit whatever the destination allows.
 
     `mode` defaults to `"rebuild"` because both backends call `clear_database`
     immediately before this function (`sync_to_neo4j`, `sync_to_arcadedb`), so
@@ -207,11 +351,26 @@ def _execute_sync_transaction(
     that can know that, which is why the `_sync_*` functions themselves default
     to the conservative `"update"` instead.
     """
-    with session.begin_transaction() as tx:
-        # First, and inside the transaction: the context describes this snapshot,
+    tx = _SegmentedTx(
+        session, SYNC_COMMIT_ROWS, heartbeat=payload.project_context is not None
+    )
+    try:
+        # First, and in the first segment: the context describes this snapshot,
         # so it must not outlive a sync that failed halfway. It depends on no
         # other node, hence the position.
         _sync_project_context(tx, payload.project_context, mode)
+        # The load mark, straight after the vertex it lives on, so it commits
+        # with the first segment: from then on an interrupted load leaves a graph
+        # that says it is incomplete instead of passing for whole. Lowered by
+        # `sync_to_neo4j` only after the last segment. Same contract as ArcadeDB.
+        if payload.project_context is not None:
+            tx.run(
+                f"MATCH (p:ProjectContext) SET p.{LOAD_STATE_PROP} = $state, "
+                f"p.{LOAD_OWNER_PROP} = $owner, p.{LOAD_HEARTBEAT_PROP} = $beat",
+                state=LOAD_IN_PROGRESS,
+                owner=_load_owner_id(),
+                beat=time.time(),
+            )
         _sync_sources(tx, payload.sources, mode=mode)
         _sync_items(tx, payload.items, mode=mode)
         _sync_from_source(tx, payload.from_source)
@@ -227,6 +386,9 @@ def _execute_sync_transaction(
         _sync_entities(tx, payload.entities)
         _sync_refers_to(tx, payload.refers_to_edges)
         tx.commit()
+    except Exception:
+        tx.close()
+        raise
 
 
 def _sync_project_context(
@@ -314,6 +476,26 @@ def _write_clause(mode: SyncMode, pattern: str) -> str:
 #: is unchanged. The ArcadeDB backend passes a much smaller value — see
 #: `_run_in_batches` for why that server needs one.
 DEFAULT_SYNC_BATCH_SIZE = 50_000
+
+#: How many ROWS a segmented write may accumulate before committing.
+#:
+#: A transaction holding a whole corpus is bounded by the server's transaction
+#: memory, not by its disk: a stock Neo4j with a 1 GB heap caps a single
+#: transaction at 717 MB, and the real corpus hit that ceiling 149s in —
+#: `MemoryPoolOutOfMemoryError`, with nothing written.
+#:
+#: Counted in rows, not in statements, and that distinction is the whole point.
+#: A first attempt committed every 10 statements, which sounds frequent until
+#: you notice `_run_in_batches` puts 50,000 rows in each: 500,000 rows per
+#: segment, which is almost exactly the 717 MB ceiling. It failed identically,
+#: at 142s. Worse, most phases issue fewer than 10 statements in total, so the
+#: counter often never reached its threshold at all and whole phases rode on one
+#: transaction regardless.
+#:
+#: 100,000 rows keeps a segment near a seventh of that stock ceiling, which
+#: leaves room for a server configured smaller still, and costs a commit roughly
+#: every two statements at the default batch size.
+SYNC_COMMIT_ROWS = 100_000
 
 
 def _run_in_batches(

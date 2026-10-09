@@ -195,3 +195,124 @@ def test_both_modes_refuse_a_graph_someone_else_is_loading():
     update_path = source.index("def synchronize_payload")
     assert "arcadedb_describe_running_load" in source[rebuild_path:update_path]
     assert "arcadedb_describe_running_load" in source[update_path:]
+
+
+# -- the same fix, on the Neo4j backend -------------------------------------
+#
+# A whole corpus in one transaction is bounded by the server's transaction
+# memory: a stock 1 GB Neo4j caps one at 717 MB, and the real corpus hit that
+# ceiling 149s in with nothing written.
+
+from synesis_graph.backends.neo4j import SYNC_COMMIT_ROWS, _SegmentedTx
+
+
+class FakeNeo4jTx:
+    def __init__(self, log):
+        self._log = log
+        self._closed = False
+
+    def run(self, query, **params):
+        self._log.append("stmt")
+        return []
+
+    def commit(self):
+        self._log.append("commit")
+        self._closed = True
+
+    def rollback(self):
+        self._log.append("rollback")
+        self._closed = True
+
+    def closed(self):
+        return self._closed
+
+
+class FakeNeo4jSession:
+    def __init__(self):
+        self.log: list[str] = []
+
+    def begin_transaction(self):
+        self.log.append("begin")
+        return FakeNeo4jTx(self.log)
+
+
+def test_neo4j_commits_by_rows_not_by_statements():
+    """Counting statements is what made the first attempt fail identically.
+
+    `_run_in_batches` puts 50,000 rows in each statement, so "commit every 10
+    statements" meant 500,000 rows — almost exactly the 717 MB ceiling it was
+    supposed to stay under.
+    """
+    session = FakeNeo4jSession()
+    tx = _SegmentedTx(session, commit_rows=100)
+    # One statement carrying more than the threshold must commit on its own.
+    tx.run("UNWIND $rows AS r CREATE (n)", rows=[{}] * 250)
+    assert session.log.count("commit") == 1
+
+
+def test_a_phase_smaller_than_the_threshold_still_rides_one_segment():
+    """Below the threshold nothing commits early — that is the intended shape."""
+    session = FakeNeo4jSession()
+    tx = _SegmentedTx(session, commit_rows=100_000)
+    for _ in range(5):
+        tx.run("UNWIND $rows AS r CREATE (n)", rows=[{}] * 1_000)
+    assert session.log.count("commit") == 0
+    tx.commit()
+    assert session.log.count("commit") == 1
+
+
+def test_rows_accumulate_across_statements_and_across_phases():
+    """The old counter reset per phase; memory does not."""
+    session = FakeNeo4jSession()
+    tx = _SegmentedTx(session, commit_rows=1_000)
+    for _ in range(4):
+        tx.run("UNWIND $rows AS r CREATE (n)", rows=[{}] * 300)
+    assert session.log.count("commit") == 1
+
+
+def test_a_statement_without_rows_still_counts_as_work():
+    session = FakeNeo4jSession()
+    tx = _SegmentedTx(session, commit_rows=3)
+    for _ in range(3):
+        tx.run("CREATE (p:ProjectContext)")
+    assert session.log.count("commit") == 1
+
+
+def test_neo4j_segmenting_can_be_switched_off():
+    session = FakeNeo4jSession()
+    tx = _SegmentedTx(session, commit_rows=0)
+    for _ in range(50):
+        tx.run("UNWIND $rows AS r CREATE (n)", rows=[{}] * 10_000)
+    assert session.log.count("commit") == 0
+
+
+def test_a_failed_neo4j_sync_rolls_back_the_open_segment():
+    session = FakeNeo4jSession()
+    tx = _SegmentedTx(session, commit_rows=100_000)
+    tx.run("CREATE (n)")
+    tx.close()
+    assert "rollback" in session.log
+
+
+def test_closing_an_already_committed_segment_is_not_an_error():
+    """The cleanup path must never raise over its own bookkeeping."""
+    session = FakeNeo4jSession()
+    tx = _SegmentedTx(session, commit_rows=1)
+    tx.run("CREATE (n)")  # commits and reopens
+    tx.commit()
+    tx.close()  # must not raise
+
+
+def test_a_segment_stays_well_under_a_stock_servers_transaction_ceiling():
+    """500,000 rows measured at ~717 MB, which is the stock limit exactly."""
+    assert SYNC_COMMIT_ROWS <= 250_000
+
+
+def test_both_backends_segment_by_default():
+    from synesis_graph.backends.arcadedb import SYNC_BATCH_SIZE
+    from synesis_graph.backends.arcadedb import SYNC_COMMIT_EVERY as arcade_every
+
+    assert SYNC_COMMIT_ROWS > 0
+    # ArcadeDB counts statements, but its 5,000-row batches keep a segment at
+    # 50,000 rows — an order of magnitude under where Neo4j's ceiling sits.
+    assert arcade_every * SYNC_BATCH_SIZE <= SYNC_COMMIT_ROWS

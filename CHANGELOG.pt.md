@@ -13,7 +13,64 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ## [Não lançado]
 
-## [0.12.0] - 2026-09-01
+## [0.12.0] - 2026-10-09
+
+### Corrigido — o Neo4j também escreve em segmentos
+
+A mesma falha, no outro backend: um corpus inteiro numa transação é limitado
+pela memória de transação do servidor, e o corpus real estourou o teto de
+717 MB por transação de um Neo4j padrão de 1 GB aos 149s
+(`MemoryPoolOutOfMemoryError`), sem gravar nada.
+
+O Neo4j agora faz commit em segmentos contados em **linhas**, não em instruções
+(`SYNC_COMMIT_ROWS = 100_000`). Uma primeira tentativa fazia commit a cada 10
+instruções — com 50.000 linhas por lote, 500.000 linhas, quase exatamente o teto
+— e falhou igual aos 142s. O `_SegmentedTx` esgota cada resultado antes do
+commit e desfaz o segmento aberto em caso de falha.
+
+### Adicionado — a marca de carga e suas guardas também no Neo4j
+
+Segmentos no Neo4j trazem a mesma troca que no ArcadeDB, e a mesma resposta: a
+marca `load_state` no `ProjectContext` (levantada no primeiro segmento, renovada
+por heartbeat a cada commit, baixada só depois do último) e as duas guardas —
+uma segunda carga se recusa a começar enquanto outra roda, e `--mode update`
+recusa um grafo meio escrito. As partes puras (constantes,
+`describe_running_load`, `load_is_incomplete`) foram para
+`backends/load_state.py`, compartilhado pelos dois backends; o `arcadedb` as
+reexporta.
+
+### Alterado — a estimativa de custo das métricas escala por arestas e se calibra no servidor
+
+A estimativa anunciava "uns 4 minutos" para um trabalho que levou onze, e duas
+de três métricas passaram de um timeout apresentado como folgado.
+
+- O custo agora escala por **arestas**, com a complexidade publicada de cada
+  algoritmo (PageRank ~E, Louvain ~E·log V, betweenness ~V·E), a partir de um
+  grafo de referência medido (275.687 vértices, 820.388 arestas); a taxa de
+  reserva do Louvain é medida (640s), não mais emprestada do betweenness.
+- **Calibração**: o PageRank roda primeiro de qualquer forma, então seu tempo
+  real é medido e escala a estimativa do par caro — sem custo extra.
+- Uma métrica estimada acima do timeout por requisição é **avisada antes de
+  começar**, indicando `[arcadedb].timeout`, `--metrics fast` ou uma máquina
+  mais rápida.
+
+### Corrigido — campos lidos pelo TIPO declarado, não pelo nome
+
+Auditoria de 2026-10-09. Nos estudos de caso, o campo TOPIC se chama `topic` em
+35 templates e `group`/`grupo`/`topico`/`category` em 11; campos CHAIN podem ter
+qualquer nome; a descrição de CODE vinha de um nome de campo específico.
+
+- **CHAIN:** a extração lia `data["chain"]` e ignorava `chain_field_names`; um
+  CHAIN com outro nome não gerava cadeia. Agora as cadeias vêm de todos os
+  campos CHAIN do template.
+- **CODE:** a descrição de cada código vem do campo ligado por BUNDLE
+  (`code_description_fields()`); o trecho-base cai no MEMO do template. Os nomes
+  antigos ficam como reserva.
+- **TOPIC:** Topic→Topic `IS_LINKED_TO`, os mapeamentos Topic→Aspect/Dimension
+  e as métricas de tópico usam o campo declarado `TYPE TOPIC`
+  (`topic_field_of()`), com o rótulo e a relação que ele já recebe. **Rótulos
+  inalterados.** `aspect`/`dimension` seguem pelo nome (desenhos de projeto).
+
 
 ### Corrigido — uma carga grande não é mais escrita numa transação única
 
