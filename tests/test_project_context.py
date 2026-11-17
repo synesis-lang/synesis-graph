@@ -145,6 +145,23 @@ class TestBuildProjectContext:
     def test_description_comes_from_the_synp_block(self):
         assert build(make_json()).description == "Um estudo qualitativo."
 
+    def test_competency_questions_become_a_markdown_section(self):
+        # Bloco QUESTIONS do .synp (synesis >= 0.15): ids e ordem preservados.
+        data = make_json()
+        data["project"]["questions"] = [
+            {"id": "Q1", "text": "Quais táticas aparecem em cada canal?"},
+            {"id": "Q2", "text": "Quais evidências tratam de phishing?"},
+        ]
+        summary = build(data).project_summary
+        section = summary.split("## Questões de competência\n", 1)[1].split("\n\n", 1)[0]
+        assert section == (
+            "- **Q1** Quais táticas aparecem em cada canal?\n"
+            "- **Q2** Quais evidências tratam de phishing?"
+        )
+
+    def test_project_without_questions_has_no_section(self):
+        assert "Questões de competência" not in build(make_json()).project_summary
+
     def test_missing_description_becomes_empty_string(self):
         # A project without a DESCRIPTION block yields None from the compiler;
         # the property stays a string so consumers need no special case.

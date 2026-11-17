@@ -22,7 +22,7 @@ def _is_gds_available(session: Any) -> bool:
     try:
         result = session.run("RETURN gds.version() AS version")
         version = result.single()["version"]
-        logger.info(f"GDS detectado: versão {version}")
+        logger.info(f"GDS detected: version {version}")
         return True
     except Exception:
         return False

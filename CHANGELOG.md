@@ -11,7 +11,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.13.0] - 2026-11-17
+
+### Fixed — duplicated definition on the concept
+
+- With `ROLE NOTE DEFINITION`, the compiler also puts the definition in
+  `description`, and the concept vertex stored both properties with the same
+  text (`definicao` and `description`; 791 of 791 in Fraudes Digitais).
+  `description` is now written only when it does not repeat a template field;
+  projects where it is the only definition are unchanged.
+
+### Changed — compiler floor
+
+- `synesis>=0.15.0` (was `>=0.10.0`): without `indices.aliases` (synesis
+  < 0.15) the graph would treat non-preferred names as concepts.
+
+### Changed — CLI output in English
+
+- The few messages still in Portuguese (missing `synesis` library,
+  compilation failure, GDS detection) are now in English. The `ProjectContext`
+  text stored in the graph (read through MCP) stays in Portuguese: it is
+  content, not CLI output, and changing it would alter published dashboards.
+
+### Added — USE (stage U)
+
+- With `indices.aliases` in the JSON, a non-preferred name does not become a
+  concept node; mentions and chains link to the target (which keeps the names
+  in `aliases`); a chain that collapses after USE is dropped, and an ITEM that
+  cites both names mentions the target once. Without `aliases`, nothing changes.
+
+### Fixed
+
+- A compilation error listed the diagnostics one character per line
+  (`get_diagnostics()` returns text); now one entry per line.
+
+### Added — adopted hierarchy edges (stage A4)
+
+- `KIND_OF`, `PART_OF` and `INSTANCE_OF` edges (child -> parent, with the
+  declaring `field` as a property), built from the JSON's `indices.relations`
+  (synesis >= 0.15, `ROLE HIERARCHY`) and written by both backends. In `update`
+  mode the previous hierarchy edges are removed first; ArcadeDB declares the
+  three edge types up front so MCP introspection announces them.
+- The HTML Ontology panel shows each concept's parents and children with the
+  species.
+- The `ProjectContext` navigation guide documents the hierarchy and the subtree
+  evidence query (`count(DISTINCT i)` over `*0..`), so an MCP client neither
+  multiplies counts through a concept with two parents nor confuses the adopted
+  hierarchy with `RELATES_TO`.
+
+### Changed — concept identity is the compiler's
+
+- Chain and mention names are reconciled with ontology names by
+  `concept_identity` (the compiler's `normalize_code`: case, whitespace and
+  Unicode NFC) instead of a plain `.lower()`. Names the compiler already treats
+  as one concept (`Big  Data` / `big data`, composed / decomposed accents) no
+  longer become separate nodes.
+
+### Added — competency questions in `ProjectContext`
+
+- The `.synp` `QUESTIONS` block (synesis >= 0.15) becomes a "Questões de
+  competência" section of the `ProjectContext` Markdown summary, with ids and
+  order preserved. No new property, so no schema change in either backend; a
+  project without the block is unchanged.
 
 ## [0.12.0] - 2026-10-09
 

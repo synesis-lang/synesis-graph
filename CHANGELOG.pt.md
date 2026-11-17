@@ -11,7 +11,67 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ---
 
-## [Não lançado]
+## [0.13.0] - 2026-11-17
+
+### Corrigido — definição duplicada no conceito
+
+- Com `ROLE NOTE DEFINITION`, o compilador põe a definição também em
+  `description`, e o vértice do conceito gravava as duas propriedades com o
+  mesmo texto (`definicao` e `description`; 791 de 791 no Fraudes Digitais).
+  `description` agora só é gravada quando não repete um campo do template;
+  projetos em que ela é a única definição não mudam.
+
+### Mudado — piso do compilador
+
+- `synesis>=0.15.0` (era `>=0.10.0`): sem `indices.aliases` (synesis < 0.15)
+  o grafo trataria os preteridos como conceitos.
+
+### Mudado — saídas do CLI em inglês
+
+- As poucas mensagens que restavam em português (biblioteca `synesis` ausente,
+  falha de compilação, detecção do GDS) passam a inglês. O texto do
+  `ProjectContext` gravado no grafo (lido via MCP) segue em português: é
+  conteúdo, não saída do CLI, e mudá-lo altera os painéis publicados.
+
+### Adicionado — USE (etapa U)
+
+- Com `indices.aliases` no JSON, o preterido não vira nó de conceito; menções
+  e cadeias ligam ao alvo (que guarda os nomes em `aliases`); cadeia que
+  colapsa após USE sai, e um ITEM que cita os dois nomes menciona o alvo uma
+  vez. Sem `aliases`, nada muda.
+
+### Corrigido
+
+- Erro de compilação listava os diagnósticos um caractere por linha
+  (`get_diagnostics()` devolve texto); agora uma entrada por linha.
+
+
+### Adicionado — arestas da hierarquia adotada (etapa A4)
+
+- Arestas `KIND_OF`, `PART_OF` e `INSTANCE_OF` (filho -> pai, com o `field` que
+  declara a espécie), a partir de `indices.relations` do JSON (synesis >= 0.15,
+  `ROLE HIERARCHY`), gravadas pelos dois backends. No modo `update`, as arestas
+  de hierarquia anteriores são removidas antes; o ArcadeDB declara os três tipos
+  de aresta antes da carga.
+- O painel Ontologia do HTML mostra pais e filhos de cada conceito, com a
+  espécie.
+- O guia de navegação do `ProjectContext` documenta a hierarquia e a consulta
+  de evidências da subárvore (`count(DISTINCT i)` sobre `*0..`).
+
+### Mudado — a identidade de conceito é a do compilador
+
+- Nomes de cadeias e menções são reconciliados com os nomes da ontologia por
+  `concept_identity` (o `normalize_code` do compilador: caixa, espaços e NFC),
+  em vez de um `.lower()` simples. Nomes que o compilador já trata como um só
+  conceito (`Big  Data` / `big data`, acento composto / decomposto) deixam de
+  virar nós separados.
+
+### Adicionado — questões de competência no `ProjectContext`
+
+- O bloco `QUESTIONS` do `.synp` (synesis >= 0.15) vira uma seção "Questões de
+  competência" no resumo Markdown do `ProjectContext`, com ids e ordem
+  preservados. Nenhuma propriedade nova, logo nenhuma mudança de esquema nos dois
+  backends; um projeto sem o bloco não muda.
 
 ## [0.12.0] - 2026-10-09
 

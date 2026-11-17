@@ -239,6 +239,33 @@ def _html_build_hyperedges(
 _TAX_NODE_COLOR = "#6B6B70"  # neutral grey for taxonomy-value nodes (Topic/Aspect/…)
 
 
+def _html_hierarchy_extra(payload: GraphPayload, name: str) -> dict[str, str]:
+    """{"pais": ..., "filhos": ...} de um conceito, com a especie de cada ligacao.
+
+    Lido de `payload.hierarchy_edges` (visao canonica, o .syno). Os indices sao
+    montados uma vez por payload e guardados nele. Vazio sem hierarquia.
+    """
+    edges = getattr(payload, "hierarchy_edges", None) or []
+    if not edges:
+        return {}
+    index = getattr(payload, "_html_hierarchy_index", None)
+    if index is None:
+        parents: dict[str, list[str]] = {}
+        children: dict[str, list[str]] = {}
+        for e in edges:
+            species = e["type"].replace("_OF", "")
+            parents.setdefault(e["child"], []).append(f"{e['parent']} ({species})")
+            children.setdefault(e["parent"], []).append(f"{e['child']} ({species})")
+        index = (parents, children)
+        object.__setattr__(payload, "_html_hierarchy_index", index)
+    out: dict[str, str] = {}
+    if name in index[0]:
+        out["pais"] = ", ".join(sorted(index[0][name]))
+    if name in index[1]:
+        out["filhos"] = ", ".join(sorted(index[1][name]))
+    return out
+
+
 def _html_build_taxonomy_view(
     payload: GraphPayload,
     kept: set,
@@ -564,6 +591,8 @@ def _html_render_payload(
                 first_val = vals[0] if isinstance(vals, list) else vals
                 if first_val:
                     extra[gf] = first_val
+        # Hierarquia adotada (ROLE HIERARCHY): pais e filhos no painel Ontologia.
+        extra.update(_html_hierarchy_extra(payload, name))
         node: dict[str, Any] = {
             "id": slug,
             "label": name,

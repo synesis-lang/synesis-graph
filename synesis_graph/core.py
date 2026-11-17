@@ -18,12 +18,27 @@ with contextlib.suppress(ModuleNotFoundError):
 
 from synesis_graph.sanitize import sanitize_cypher_label
 
+
+def concept_identity(name: str) -> str:
+    """Whether two names are the same concept, as the compiler decides it.
+
+    Delegates to `synesis.ast.normalize.normalize_code`, the single identity
+    normalizer of the ecosystem (case and whitespace; Unicode NFC as well). A
+    plain `.lower()` here treated "Big  Data" and "big data", or a composed and
+    a decomposed "ç", as different nodes while the compiler merged them.
+    """
+    import unicodedata
+
+    from synesis.ast.normalize import normalize_code
+
+    return str(normalize_code(unicodedata.normalize("NFC", str(name))))
+
 # Hard exit if synesis is not installed — preserved exactly from original.
 try:
     from synesis import SynesisCompiler
 except ImportError:
-    print("ERRO CRÍTICO: Biblioteca 'synesis' não encontrada.")
-    print("Instale via: pip install synesis")
+    print("CRITICAL ERROR: the 'synesis' library was not found.")
+    print("Install it with: pip install synesis")
     sys.exit(1)
 
 
@@ -510,7 +525,9 @@ def _render_field_doc(name: str, spec: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render_navigation_doc(concept_label: str, graph_fields: list[str]) -> list[str]:
+def _render_navigation_doc(
+    concept_label: str, graph_fields: list[str], has_hierarchy: bool = False
+) -> list[str]:
     """The edges, with their direction, so a consumer need not guess the topology.
 
     Without this the document says `aspect` is a taxonomy but never says which
@@ -539,6 +556,19 @@ def _render_navigation_doc(concept_label: str, graph_fields: list[str]) -> list[
     for field_name, label in zip(graph_fields, get_taxonomy_labels(graph_fields), strict=True):
         relation = _get_taxonomy_relation(field_name)
         lines.append(f"- `({concept_label})-[:{relation}]->({label})`")
+    if has_hierarchy:
+        # Hierarquia ADOTADA pelo projeto (.syno, ROLE HIERARCHY), distinta do
+        # que as fontes afirmam (RELATES_TO). As tres especies sao hierarquia.
+        lines += [
+            f"- `({concept_label})-[:KIND_OF|PART_OF|INSTANCE_OF]->({concept_label})` — "
+            "hierarquia adotada pelo projeto (filho -> pai; tipo de, parte de, caso de)",
+            "",
+            "Evidências de um conceito e de toda a sua subárvore, sem contar duas vezes "
+            "o trecho que menciona dois descendentes (um conceito pode ter dois pais):",
+            f"`MATCH (d:{concept_label})-[:KIND_OF|PART_OF|INSTANCE_OF*0..]->"
+            f"(c:{concept_label} {{name: $nome}}) "
+            "MATCH (d)<-[:MENTIONS]-(i:Item) RETURN count(DISTINCT i)`",
+        ]
 
     lines += [
         "",
@@ -583,7 +613,11 @@ def _render_template_doc(
         lines.append(f"- **{scope}**: " + ("; ".join(parts) if parts else "sem restrições"))
     lines.append("")
 
-    lines.extend(_render_navigation_doc(concept_label, graph_fields))
+    has_hierarchy = any(
+        str((spec or {}).get("role") or "").startswith("HIERARCHY ")
+        for spec in (template.get("field_specs") or {}).values()
+    )
+    lines.extend(_render_navigation_doc(concept_label, graph_fields, has_hierarchy))
 
     lines.append("## Campos")
     lines.append("")
@@ -607,6 +641,18 @@ def _render_project_summary(
     if metadata:
         lines.append("## Metadados")
         lines.extend(f"- {key}: {value}" for key, value in metadata.items())
+        lines.append("")
+
+    # Questões de competência (bloco QUESTIONS do .synp, synesis >= 0.15): o que a
+    # estrutura do projeto precisa permitir responder. Vêm antes do conteúdo
+    # porque orientam a leitura do grafo; sem o bloco, a seção não existe.
+    questions = [
+        q for q in (project.get("questions") or [])
+        if isinstance(q, dict) and q.get("id") and q.get("text")
+    ]
+    if questions:
+        lines.append("## Questões de competência")
+        lines.extend(f"- **{q['id']}** {q['text']}" for q in questions)
         lines.append("")
 
     lines.append("## Conteúdo deste grafo")
@@ -873,6 +919,12 @@ class GraphPayload:
     # Taxonomy relations derived from graph_fields, mirroring sync_to_neo4j's _sync_taxonomies.
     # Each entry: {source, target, type} (e.g. concept GROUPED_BY topic, topic IS_LINKED_TO topic).
     taxonomy_edges: list[dict[str, Any]] = field(default_factory=list)
+    # Hierarchy the project ADOPTS (synesis >= 0.15: fields with ROLE HIERARCHY
+    # KIND/PART/INSTANCE, read from the JSON's `indices.relations`). Each entry:
+    # {child, parent, type: KIND_OF|PART_OF|INSTANCE_OF, field}. Written by both
+    # backends; empty for a template without hierarchy roles. CHAIN relations
+    # never enter here: what a source asserts stays RELATES_TO.
+    hierarchy_edges: list[dict[str, Any]] = field(default_factory=list)
     # Reified identity nodes from IDENTIFIES (multi-project linkage).
     # cypher_label -> [{entity_id, entity, member, source_bibtex}]. Empty for
     # single-project runs and for any project without linkage modifiers.
@@ -1067,9 +1119,11 @@ def compile_project_to_json(
 
     if not result.success:
         return CompilationError(
-            message="Falha na compilação do projeto Synesis",
+            message="Synesis project compilation failed",
             stage="compilation",
-            diagnostics=[str(d) for d in result.get_diagnostics()],
+            # get_diagnostics() devolve um TEXTO: iterar sobre ele dava uma linha
+            # por caractere no terminal. Uma entrada por linha nao vazia.
+            diagnostics=[line for line in result.get_diagnostics().splitlines() if line.strip()],
         )
 
     # Export to temporary JSON and read back
@@ -1182,6 +1236,11 @@ def _build_graph_payload(
     """
     project_name = json_data.get("project", {}).get("name", "synesis")
     ontology = json_data.get("ontology", {})
+    # Etapa U (ROLE USE): o preterido nao vira no de conceito; suas mencoes e
+    # cadeias ligam ao alvo (mapa abaixo). So age quando o JSON traz o mapa.
+    aliases: dict[str, str] = dict((json_data.get("indices") or {}).get("aliases") or {})
+    if aliases:
+        ontology = {name: entry for name, entry in ontology.items() if name not in aliases}
     corpus = json_data.get("corpus", [])
     # Une bibliography + dataset por bibref (§12.2): campos SCOPE SOURCE de origem
     # ON DATASET vivem numa secao `dataset` separada no JSON (para consumidores
@@ -1229,20 +1288,47 @@ def _build_graph_payload(
         ),
     )
 
-    # Reconcile chain/mention names against canonical ontology names (case-insensitive).
+    # Reconcile chain/mention names against canonical ontology names, by the
+    # compiler's own identity (case, whitespace and Unicode NFC — `concept_identity`).
     # Annotators may write "CCS_Support" in a .syn while the .syno has "Ccs_Support" —
     # the compiler preserves both spellings, creating spurious duplicate nodes.
     _canonical_map: dict[str, str] = {
-        c["props"]["name"].lower(): c["props"]["name"] for c in concepts
+        concept_identity(c["props"]["name"]): c["props"]["name"] for c in concepts
     }
+    if aliases:
+        by_identity = {concept_identity(c["props"]["name"]): c for c in concepts}
+        for alias, target in sorted(aliases.items()):
+            canonical_target = _canonical_map.get(concept_identity(target), target)
+            _canonical_map[concept_identity(alias)] = canonical_target
+            node = by_identity.get(concept_identity(target))
+            if node is not None:
+                node["props"].setdefault("aliases", []).append(alias)
     for ch in chains:
-        ch["source"] = _canonical_map.get(ch["source"].lower(), ch["source"])
-        ch["target"] = _canonical_map.get(ch["target"].lower(), ch["target"])
+        ch["source"] = _canonical_map.get(concept_identity(ch["source"]), ch["source"])
+        ch["target"] = _canonical_map.get(concept_identity(ch["target"]), ch["target"])
     for mn in mentions:
-        mn["concept"] = _canonical_map.get(mn["concept"].lower(), mn["concept"])
+        mn["concept"] = _canonical_map.get(concept_identity(mn["concept"]), mn["concept"])
+    if aliases:
+        # Projecao resolvida: cadeia que colapsa (A -> R -> A so por USE) sai, e
+        # um ITEM que cita o preterido e o alvo menciona o conceito uma vez.
+        chains = [ch for ch in chains if ch["source"] != ch["target"]]
+        seen_mentions: set = set()
+        unique_mentions = []
+        for mn in mentions:
+            key = tuple(sorted((k, str(v)) for k, v in mn.items()))
+            if key not in seen_mentions:
+                seen_mentions.add(key)
+                unique_mentions.append(mn)
+        mentions = unique_mentions
 
     taxonomy_edges = _build_taxonomy_edges(
         concepts, graph_fields, chains, json_data.get("template", {}).get("field_specs", {})
+    )
+    hierarchy_edges = build_hierarchy_edges(json_data, _canonical_map)
+    # The HTML's Ontology layer draws taxonomy_edges; the adopted hierarchy is
+    # part of the ontology, so it goes there too (the backends use hierarchy_edges).
+    taxonomy_edges.extend(
+        {"source": e["child"], "target": e["parent"], "type": e["type"]} for e in hierarchy_edges
     )
 
     return GraphPayload(
@@ -1262,6 +1348,7 @@ def _build_graph_payload(
         from_source=from_source,
         item_fields=item_fields,
         taxonomy_edges=taxonomy_edges,
+        hierarchy_edges=hierarchy_edges,
         field_specs=json_data.get("template", {}).get("field_specs", {}),
         project_context=build_project_context(
             json_data,
@@ -1423,6 +1510,40 @@ def _index_to_label(value: Any, value_map: list[dict[str, Any]]) -> str:
     return str(value)
 
 
+HIERARCHY_EDGE_TYPES = {"KIND": "KIND_OF", "PART": "PART_OF", "INSTANCE": "INSTANCE_OF"}
+
+
+def build_hierarchy_edges(
+    json_data: dict[str, Any], canonical: dict[str, str] | None = None
+) -> list[dict[str, Any]]:
+    """Adopted hierarchy edges from `indices.relations` (JSON 3.1).
+
+    The relation index is the compiler's canonical view: the .syno hierarchy,
+    already validated (no cycles, one species per pair). `field` names the
+    template field that declares the species, so a consumer can tell `tipo_de`
+    from another KIND field. Sorted, so a re-sync writes the same rows.
+    """
+    relations = ((json_data.get("indices") or {}).get("relations")) or {}
+    if not isinstance(relations, dict):
+        return []
+    field_of: dict[str, str] = {}
+    for name, spec in ((json_data.get("template") or {}).get("field_specs") or {}).items():
+        role = (spec or {}).get("role") or ""
+        if role.startswith("HIERARCHY "):
+            field_of.setdefault(role.split(" ", 1)[1], name)
+    canonical = canonical or {}
+    edges: list[dict[str, Any]] = []
+    for species, edge_type in HIERARCHY_EDGE_TYPES.items():
+        for pair in relations.get(species) or []:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            child, parent = (canonical.get(concept_identity(str(x)), str(x)) for x in pair)
+            edges.append({"child": child, "parent": parent, "type": edge_type,
+                          "field": field_of.get(species, "")})
+    edges.sort(key=lambda e: (e["type"], e["child"], e["parent"]))
+    return edges
+
+
 def _build_taxonomy_edges(
     concepts: list[dict[str, Any]],
     graph_fields: list[str],
@@ -1536,6 +1657,14 @@ def _extract_concepts(
             # MERGE key and `search_name` is what the full-text index reads.
             if sf in entry and sf not in ("name", "search_name"):
                 props[sf] = entry[sf]
+
+        # `description` do compilador e a definicao canonica (campo com ROLE NOTE
+        # DEFINITION). Quando esse campo do template ja esta no vertice com o
+        # mesmo texto (`definicao`), a copia so duplica: 791 de 791 conceitos
+        # no Fraudes Digitais (2026-11-17). Fica so quando nao repete nenhum.
+        desc = props.get("description")
+        if desc and any(props.get(sf) == desc for sf in scalar_fields if sf != "description"):
+            props["description"] = None
 
         relations: dict[str, list[str]] = {}
         for gf in graph_fields:

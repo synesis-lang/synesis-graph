@@ -382,6 +382,10 @@ def _execute_sync_transaction(
             field_specs=payload.field_specs,
         )
         _sync_mentions(tx, payload.mentions, payload.concept_label)
+        # getattr: hand-built payloads (and older callers) carry no hierarchy.
+        _sync_hierarchy(
+            tx, getattr(payload, "hierarchy_edges", []), payload.concept_label, mode=mode
+        )
         # Reified identities must exist before the edges that point at them.
         _sync_entities(tx, payload.entities)
         _sync_refers_to(tx, payload.refers_to_edges)
@@ -848,6 +852,45 @@ def _sync_taxonomies(
             "WITH t1, t2, count(*) AS strength "
             "MERGE (t1)-[r:IS_LINKED_TO]->(t2) "
             "SET r.strength = strength, r.last_updated = timestamp()"
+        )
+
+
+HIERARCHY_RELATIONSHIPS = ("KIND_OF", "PART_OF", "INSTANCE_OF")
+
+
+def _sync_hierarchy(
+    tx: Any,
+    edges: list[dict[str, Any]],
+    concept_label: str,
+    batch_size: int = DEFAULT_SYNC_BATCH_SIZE,
+    mode: SyncMode = DEFAULT_SYNC_MODE,
+) -> None:
+    """Writes the adopted hierarchy: (child)-[:KIND_OF|PART_OF|INSTANCE_OF {field}]->(parent).
+
+    In `update` the previous hierarchy edges are removed first: a pair the .syno
+    no longer declares must not survive a reload (a rebuild starts empty, so
+    there is nothing to remove). One query per relationship type, because a
+    relationship type cannot be a Cypher parameter.
+    """
+    if mode != "rebuild":
+        for rel in HIERARCHY_RELATIONSHIPS:
+            tx.run(f"MATCH (:{concept_label})-[r:{rel}]->(:{concept_label}) DELETE r")
+    for rel in HIERARCHY_RELATIONSHIPS:
+        rows = [{"child": e["child"], "parent": e["parent"], "field": e.get("field", "")}
+                for e in edges if e.get("type") == rel]
+        if not rows:
+            continue
+        _run_in_batches(
+            tx,
+            f"""
+            UNWIND $rows AS row
+            MATCH (c:{concept_label} {{name: row.child}})
+            MATCH (p:{concept_label} {{name: row.parent}})
+            MERGE (c)-[r:{rel}]->(p)
+            SET r.field = row.field
+        """,
+            rows,
+            batch_size,
         )
 
 

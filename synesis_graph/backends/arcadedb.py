@@ -40,6 +40,7 @@ from synesis_graph.backends.neo4j import (
     _sync_concepts,
     _sync_entities,
     _sync_from_source,
+    _sync_hierarchy,
     _sync_items,
     _sync_mentions,
     _sync_project_context,
@@ -700,6 +701,11 @@ def _create_schema(client: ArcadeDBTransport, payload: GraphPayload) -> None:
         if validate_cypher_label(type_name):
             client.command(f"CREATE VERTEX TYPE {type_name} IF NOT EXISTS", language="sql")
 
+    # Adopted hierarchy (ROLE HIERARCHY): declared before the load so the schema
+    # announces them to MCP introspection even before any edge exists.
+    for edge_type in ("KIND_OF", "PART_OF", "INSTANCE_OF"):
+        client.command(f"CREATE EDGE TYPE {edge_type} IF NOT EXISTS", language="sql")
+
     # ProjectContext's properties are declared even though none is indexed.
     # Everything else in this function declares only what an index needs, but a
     # type with no declared properties shows up in `get_schema` as an empty
@@ -1078,6 +1084,10 @@ def _execute_sync_transaction(
             field_specs=payload.field_specs,
         )
         _sync_mentions(tx, payload.mentions, payload.concept_label, batch_size=bs)
+        _sync_hierarchy(
+            tx, getattr(payload, "hierarchy_edges", []), payload.concept_label,
+            batch_size=bs, mode=mode,
+        )
         _sync_entities(tx, payload.entities, batch_size=bs)
         _sync_refers_to(tx, payload.refers_to_edges, batch_size=bs)
         # Commits whatever the last segment left open. The runner always leaves a
