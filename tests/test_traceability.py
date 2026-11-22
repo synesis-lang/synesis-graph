@@ -296,3 +296,26 @@ def test_failed_relativisation_omits_rather_than_leaks():
     # The line alone is useless without the file, but it is not a leak; what
     # matters is that no path reaches the graph.
     assert items[0].get("source_file", "") == ""
+
+
+# --- C-3 (synesis): the compiler already writes project-relative paths ----------
+
+def test_relative_path_from_compiler_is_kept():
+    from synesis_graph.core import relative_source_file
+
+    assert relative_source_file("anotacoes/a.syn", "") == "anotacoes/a.syn"
+    assert relative_source_file(r"anotacoes\a.syn", "D:/proj") == "anotacoes/a.syn"
+    assert relative_source_file("./a.syn", "") == "a.syn"
+
+
+def test_shared_file_outside_the_folder_keeps_its_parent_reference():
+    from synesis_graph.core import relative_source_file
+
+    assert relative_source_file("../comum/conceitos.syno", "D:/proj") == "../comum/conceitos.syno"
+
+
+def test_absolute_paths_still_follow_the_root_rule():
+    from synesis_graph.core import relative_source_file
+
+    assert relative_source_file("D:/proj/a.syn", "D:/proj") == "a.syn"
+    assert relative_source_file("D:/other/a.syn", "D:/proj") == ""

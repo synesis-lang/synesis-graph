@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import sys
 import tempfile
 import time
@@ -456,6 +457,13 @@ def relative_source_file(absolute_path: str, project_root: str) -> str:
     normalised = str(absolute_path or "").replace("\\", "/")
     if not normalised:
         return ""
+
+    # synesis with C-3 already writes paths relative to the project folder
+    # (`export_metadata.paths_relative_to = "project_folder"`). A relative path
+    # is the answer itself: keep it (`./` stripped), including `../` for a file
+    # shared from outside the folder. Only absolute paths go through the root.
+    if not (normalised.startswith("/") or re.match(r"^[A-Za-z]:/", normalised)):
+        return normalised[2:] if normalised.startswith("./") else normalised
 
     root = str(project_root or "").replace("\\", "/").rstrip("/")
     if root:

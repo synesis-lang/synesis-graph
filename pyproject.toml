@@ -8,7 +8,7 @@ version = "0.13.0"
 description = "Universal pipeline from Synesis projects to graph databases and HTML visualizations"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception"
+license = "LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception"
 license-files = ["LICENSE", "LICENSE.exception"]
 authors = [
     {name = "De Britto, Christian Maciel", email = "chriseana@gmail.com"}

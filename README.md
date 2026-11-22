@@ -666,7 +666,7 @@ This program is distributed under the **GNU Affero General Public License,
 version 3 only (AGPL-3.0-only), with the Synesis Data-Output Exception** — see
 [LICENSE](LICENSE) and [LICENSE.exception](LICENSE.exception).
 
-SPDX identifier: `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception`
+SPDX identifier: `LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception`
 
 **The graphs you generate are yours.** Exported artifacts — Cypher scripts,
 Neo4j databases, and the standalone HTML visualization — are **not** covered by
