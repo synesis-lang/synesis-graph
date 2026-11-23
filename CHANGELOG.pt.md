@@ -11,6 +11,27 @@ e este projeto adere ao [Versionamento Semântico](https://semver.org/lang/pt-BR
 
 ---
 
+## [0.13.1] - 2026-11-23
+
+### Corrigido — caminho relativo vindo do compilador (C-3 do synesis)
+
+- `relative_source_file` mantém o caminho que já chega relativo
+  (`anotacoes/a.syn`, `../comum/x.syno`). Antes ele o descartava, porque só
+  sabia relativizar caminhos absolutos pela raiz inferida. Absolutos seguem a
+  regra anterior.
+
+### Corrigido — identificador SPDX da licença (L-1)
+
+- `license` passa de `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception`
+  para `LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception`. Em SPDX, `AND`
+  significa duas licenças cumulativas, não uma permissão adicional sobre a AGPL.
+  A licença em si não mudou; o `CITATION.cff` segue `AGPL-3.0-only`.
+
+### Alterado — piso do compilador
+
+- `synesis>=0.16.0` (era `>=0.15.0`): o compilador passa a gravar caminhos
+  relativos à pasta do projeto (C-3).
+
 ## [0.13.0] - 2026-11-17
 
 ### Corrigido — definição duplicada no conceito

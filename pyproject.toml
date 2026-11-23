@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synesis-graph"
-version = "0.13.0"
+version = "0.13.1"
 description = "Universal pipeline from Synesis projects to graph databases and HTML visualizations"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,7 +33,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "synesis>=0.15.0",
+    "synesis>=0.16.0",
     "click>=8.0",
     # Motor de grafo local, sem servidor e sem Java de sistema (traz a propria
     # JVM). Dependencia BASE, nao extra: o publico deste modulo e o pesquisador
@@ -78,7 +78,7 @@ dev = [
     "tomli>=2.0 ; python_version < '3.11'",
     "ruff==0.16.1",
     "mypy==2.3.0",
-    "synesis>=0.15.0",
+    "synesis>=0.16.0",
 ]
 
 [project.urls]

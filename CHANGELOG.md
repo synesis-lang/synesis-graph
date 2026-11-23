@@ -13,20 +13,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed — caminho relativo vindo do compilador (C-3 do synesis)
+## [0.13.1] - 2026-11-23
 
-- `relative_source_file` mantém o caminho que já chega relativo (`anotacoes/a.syn`,
-  `../comum/x.syno`). Antes ele o descartava, porque só sabia relativizar caminhos
-  absolutos pela raiz inferida. Absolutos seguem a regra anterior.
+### Fixed — relative paths coming from the compiler (C-3 of synesis)
 
-### Fixed — identificador SPDX da licença (L-1)
+- `relative_source_file` keeps a path that already arrives relative
+  (`annotations/a.syn`, `../common/x.syno`). Before, it discarded it, because
+  it only knew how to relativize absolute paths against the inferred root.
+  Absolute paths follow the previous rule.
 
-- `license` passa de `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception` para
-  `LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception`. Em SPDX, `AND` significa duas
-  licenças cumulativas, não uma permissão adicional sobre a AGPL; uma exceção não
-  cadastrada se representa por um único `LicenseRef` com o conjunto dos termos
-  (`LICENSE` + `LICENSE.exception`). A licença em si não mudou. O `CITATION.cff` segue
-  `AGPL-3.0-only` (o CFF só aceita a lista SPDX).
+### Fixed — SPDX license identifier (L-1)
+
+- `license` changes from `AGPL-3.0-only AND LicenseRef-Synesis-data-output-exception`
+  to `LicenseRef-Synesis-AGPL-3.0-with-Data-Output-Exception`. In SPDX, `AND`
+  means two cumulative licenses, not an additional permission over the AGPL; an
+  unlisted exception is represented by a single `LicenseRef` holding the whole
+  set of terms (`LICENSE` + `LICENSE.exception`). The license itself did not
+  change. `CITATION.cff` keeps `AGPL-3.0-only` (CFF only accepts the SPDX list).
+
+### Changed — compiler floor
+
+- `synesis>=0.16.0` (was `>=0.15.0`): the compiler now writes paths relative to
+  the project folder in its outputs (C-3).
 
 ## [0.13.0] - 2026-11-17
 
